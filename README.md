@@ -10,8 +10,22 @@
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
-./build/mark-reader
 ```
+
+在 macOS 上，应用构建为 `build/Mark Reader.app`。CMake 生成的应用包仍使用本机 Qt 安装中的运行库；若要把 Qt 运行库和插件一起复制进包（便于在未安装 Qt 的 Mac 上运行），执行：
+
+```sh
+macdeployqt "build/Mark Reader.app"
+```
+
+Homebrew 将 Qt Svg 单独安装时，需要显式添加搜索路径；本项目的验证命令为：
+
+```sh
+xattr -cr "build/Mark Reader.app"
+macdeployqt "build/Mark Reader.app" -libpath="$(brew --prefix qtsvg)/lib" -no-codesign
+```
+
+`-no-codesign` 适合本地验证；正式分发还需要代码签名和公证。
 
 书籍副本和 `library.json` 保存在 Qt 的应用数据目录；字号偏好保存在系统应用设置中。
 
