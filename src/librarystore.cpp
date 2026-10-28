@@ -8,11 +8,22 @@
 #include <QJsonObject>
 #include <QSaveFile>
 #include <QUuid>
+#include <algorithm>
 
 LibraryStore::LibraryStore(QString dataDirectory) : m_dataDirectory(std::move(dataDirectory))
 {
     QDir().mkpath(m_dataDirectory);
     load();
+}
+
+QList<Book> LibraryStore::books() const
+{
+    QList<Book> sorted = m_books;
+    std::stable_sort(sorted.begin(), sorted.end(), [](const Book &left, const Book &right) {
+        if (left.lastRead.isValid() != right.lastRead.isValid()) return left.lastRead.isValid();
+        return left.lastRead > right.lastRead;
+    });
+    return sorted;
 }
 
 bool LibraryStore::load(QString *error)
@@ -36,6 +47,7 @@ bool LibraryStore::load(QString *error)
         book.title = object.value("title").toString();
         book.storedFileName = object.value("file").toString();
         book.position = object.value("position").toInt();
+        book.characterCount = object.value("characterCount").toInt();
         book.lastRead = QDateTime::fromString(object.value("lastRead").toString(), Qt::ISODate);
         if (!book.id.isEmpty() && !book.storedFileName.isEmpty()) m_books.append(book);
     }
@@ -51,6 +63,7 @@ bool LibraryStore::save(QString *error) const
         object.insert("title", book.title);
         object.insert("file", book.storedFileName);
         object.insert("position", book.position);
+        object.insert("characterCount", book.characterCount);
         object.insert("lastRead", book.lastRead.toString(Qt::ISODate));
         array.append(object);
     }
@@ -87,7 +100,8 @@ QString LibraryStore::importTextFile(const QString &sourcePath, QString *error)
         return {};
     }
     copy.close();
-    Book book{id, QFileInfo(sourcePath).completeBaseName(), storedName, 0, QDateTime::currentDateTime()};
+    Book book{id, QFileInfo(sourcePath).completeBaseName(), storedName, 0,
+              static_cast<int>(decoded.size()), {}};
     m_books.prepend(book);
     if (!save(error)) {
         m_books.removeFirst();

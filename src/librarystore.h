@@ -9,7 +9,7 @@ class LibraryStore {
 public:
     explicit LibraryStore(QString dataDirectory);
 
-    QList<Book> books() const { return m_books; }
+    QList<Book> books() const;
     QString importTextFile(const QString &sourcePath, QString *error = nullptr);
     QString textPath(const Book &book) const;
     bool savePosition(const QString &bookId, int position, QString *error = nullptr);

@@ -8,5 +8,6 @@ struct Book {
     QString title;
     QString storedFileName;
     int position = 0;
+    int characterCount = 0;
     QDateTime lastRead;
 };

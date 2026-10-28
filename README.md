@@ -1,6 +1,6 @@
 # Mark Reader
 
-面向 macOS 的 Qt 6 Widgets TXT 阅读器 MVP。支持导入 UTF-8 TXT、在书架中打开、调整字号，并保存/恢复阅读位置。
+面向 macOS 的 Qt 6 Widgets TXT 阅读器 MVP。支持导入 UTF-8 TXT、按最近阅读排序、查看阅读百分比、调整字号，并保存/恢复阅读位置。书架选中后可点击“打开选中”，也可按回车或双击打开。
 
 ## 构建与运行
 

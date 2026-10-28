@@ -2,6 +2,7 @@
 
 #include <QFile>
 #include <QTemporaryDir>
+#include <QTest>
 #include <QtTest>
 
 class LibraryStoreTest : public QObject {
@@ -26,6 +27,7 @@ private slots:
         const Book imported = store.books().first();
         QVERIFY(QFile::exists(store.textPath(imported)));
         QCOMPARE(imported.title, QString("sample"));
+        QCOMPARE(imported.characterCount, 12);
         QVERIFY(QFile::remove(sourcePath));
         QFile copied(store.textPath(imported));
         QVERIFY(copied.open(QIODevice::ReadOnly));
@@ -35,7 +37,9 @@ private slots:
         LibraryStore reopened(dataPath);
         QCOMPARE(reopened.books().size(), 1);
         QCOMPARE(reopened.books().first().position, 6);
+        QCOMPARE(reopened.books().first().characterCount, 12);
         QCOMPARE(reopened.books().first().id, id);
+        QVERIFY(reopened.books().first().lastRead.isValid());
     }
 
     void rejectsEmptyFiles()
@@ -63,6 +67,32 @@ private slots:
         QVERIFY(store.importTextFile(source.fileName(), &error).isEmpty());
         QVERIFY(error.contains("UTF-8"));
         QVERIFY(store.books().isEmpty());
+    }
+
+    void sortsBooksByMostRecentReading()
+    {
+        QTemporaryDir directory;
+        const QString firstPath = directory.filePath("first.txt");
+        const QString secondPath = directory.filePath("second.txt");
+        for (const QString &path : {firstPath, secondPath}) {
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("book content");
+        }
+
+        LibraryStore store(directory.filePath("app"));
+        QString error;
+        const QString firstId = store.importTextFile(firstPath, &error);
+        QVERIFY2(!firstId.isEmpty(), qPrintable(error));
+        QTest::qWait(5);
+        const QString secondId = store.importTextFile(secondPath, &error);
+        QVERIFY2(!secondId.isEmpty(), qPrintable(error));
+        QVERIFY(store.savePosition(firstId, 4, &error));
+
+        const QList<Book> sorted = store.books();
+        QCOMPARE(sorted.size(), 2);
+        QCOMPARE(sorted.first().id, firstId);
+        QCOMPARE(sorted.last().id, secondId);
     }
 };
 

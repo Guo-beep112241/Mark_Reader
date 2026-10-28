@@ -35,8 +35,11 @@ MainWindow::MainWindow(QWidget *parent)
     auto *title = new QLabel("我的书架");
     title->setStyleSheet("font-size: 26px; font-weight: 600;");
     auto *importButton = new QPushButton("导入 TXT");
+    auto *openButton = new QPushButton("打开选中");
+    openButton->setEnabled(false);
     shelfHeader->addWidget(title);
     shelfHeader->addStretch();
+    shelfHeader->addWidget(openButton);
     shelfHeader->addWidget(importButton);
     shelfLayout->addLayout(shelfHeader);
     shelfLayout->addWidget(m_shelf);
@@ -71,7 +74,13 @@ MainWindow::MainWindow(QWidget *parent)
         if (m_store.importTextFile(path, &error).isEmpty()) QMessageBox::warning(this, "导入失败", error);
         refreshShelf();
     });
-    connect(m_shelf, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { openBook(m_shelf->currentRow()); });
+    connect(m_shelf, &QListWidget::itemSelectionChanged, this, [this, openButton] {
+        openButton->setEnabled(m_shelf->currentItem() != nullptr);
+    });
+    connect(openButton, &QPushButton::clicked, this, [this] { openBook(m_shelf->currentRow()); });
+    connect(m_shelf, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
+        openBook(m_shelf->row(item));
+    });
     connect(backButton, &QPushButton::clicked, this, [this] { saveCurrentPosition(); m_pages->setCurrentIndex(0); });
     connect(smaller, &QPushButton::clicked, this, [this] {
         m_fontSize = qMax(12, m_fontSize - 1); m_reader->setPointSize(m_fontSize);
@@ -88,10 +97,23 @@ MainWindow::~MainWindow() { saveCurrentPosition(); }
 
 void MainWindow::refreshShelf()
 {
+    const QString selectedId = m_shelf->currentItem()
+        ? m_shelf->currentItem()->data(Qt::UserRole).toString() : QString();
     m_shelf->clear();
     for (const Book &book : m_store.books()) {
-        const QString progress = book.position > 0 ? QString(" · 已读到 %1 字").arg(book.position) : " · 尚未阅读";
-        m_shelf->addItem(book.title + progress);
+        QString status = "尚未阅读";
+        if (book.lastRead.isValid()) {
+            const QString when = book.lastRead.toLocalTime().toString("MM-dd HH:mm");
+            if (book.characterCount > 0) {
+                const int percent = qBound(0, book.position * 100 / book.characterCount, 100);
+                status = QString("%1% · 最近阅读 %2").arg(percent).arg(when);
+            } else {
+                status = QString("已读 %1 字 · 最近阅读 %2").arg(book.position).arg(when);
+            }
+        }
+        auto *item = new QListWidgetItem(QString("%1  ·  %2").arg(book.title, status), m_shelf);
+        item->setData(Qt::UserRole, book.id);
+        if (book.id == selectedId) m_shelf->setCurrentItem(item);
     }
 }
 
