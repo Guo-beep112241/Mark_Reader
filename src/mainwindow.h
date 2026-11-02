@@ -2,14 +2,21 @@
 
 #include "librarystore.h"
 
+#include <QHash>
 #include <QMainWindow>
+#include <QPixmap>
 
-class QListWidget;
-class QStackedWidget;
-class ReaderWidget;
-class QTimer;
 class QComboBox;
+class QLabel;
 class QLineEdit;
+class QListWidget;
+class QPushButton;
+class QStackedWidget;
+class QTimer;
+class CoverGridDelegate;
+class OrnamentRule;
+class PaperWidget;
+class ReaderWidget;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -26,6 +33,9 @@ private:
     void saveCurrentPosition();
     void reloadReaderMetadata(const Book &book);
     void applyTheme();
+    void updateReaderFooter();
+    QPixmap coverFor(const Book &book);
+
     LibraryStore m_store;
     QListWidget *m_shelf;
     QStackedWidget *m_pages;
@@ -35,6 +45,18 @@ private:
     QComboBox *m_bookmarks;
     QComboBox *m_annotations;
     QLineEdit *m_searchField;
+    QLabel *m_bookTitle;
+    QLabel *m_chapterLabel;
+    QLabel *m_emptyState;
+    QLabel *m_shelfCount;
+    QLabel *m_readerFooter;
+    QPushButton *m_themeButton;
+    PaperWidget *m_shelfPage;
+    PaperWidget *m_readerPage;
+    OrnamentRule *m_shelfRule;
+    OrnamentRule *m_readerRule;
+    CoverGridDelegate *m_shelfDelegate;
+    QHash<QString, QPixmap> m_coverCache;
     QString m_currentBookId;
     int m_fontSize = 18;
     bool m_darkTheme = false;

@@ -1,17 +1,33 @@
 #include "readerwidget.h"
 
+#include "theme.h"
+
 #include <QColor>
+#include <QFont>
+#include <QPainter>
+#include <QScrollBar>
 #include <QTextDocument>
 #include <QTextEdit>
-#include <QFont>
-#include <QScrollBar>
 
 ReaderWidget::ReaderWidget(QWidget *parent) : QPlainTextEdit(parent)
 {
     setReadOnly(true);
     setLineWrapMode(QPlainTextEdit::WidgetWidth);
-    setStyleSheet("QPlainTextEdit { background: #fbf8f0; color: #302c25; border: 0; padding: 28px; }");
+    setFrameShape(QFrame::NoFrame);
+    setBackgroundVisible(false);
+    setFont(Theme::readerFont(18));
+    setCursorWidth(2);
+    document()->setDocumentMargin(34);
+    setDarkTheme(false);
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { emit positionChanged(position()); });
+}
+
+void ReaderWidget::paintEvent(QPaintEvent *event)
+{
+    QPainter painter(viewport());
+    Theme::paintReaderPaper(painter, viewport()->rect(), m_darkTheme);
+    painter.end();
+    QPlainTextEdit::paintEvent(event);
 }
 
 int ReaderWidget::position() const
@@ -65,7 +81,7 @@ void ReaderWidget::showAnnotations(const QList<Annotation> &annotations, bool da
         selection.cursor = QTextCursor(document());
         selection.cursor.setPosition(qBound(0, annotation.start, document()->characterCount() - 1));
         selection.cursor.setPosition(qBound(0, annotation.end, document()->characterCount() - 1), QTextCursor::KeepAnchor);
-        selection.format.setBackground(darkTheme ? QColor("#685b25") : QColor("#fff0a3"));
+        selection.format.setBackground(Theme::annotationColor(darkTheme));
         selections.append(selection);
     }
     setExtraSelections(selections);
@@ -73,7 +89,11 @@ void ReaderWidget::showAnnotations(const QList<Annotation> &annotations, bool da
 
 void ReaderWidget::setDarkTheme(bool enabled)
 {
-    setStyleSheet(enabled
-        ? "QPlainTextEdit { background: #22252a; color: #e5e0d6; border: 0; padding: 28px; }"
-        : "QPlainTextEdit { background: #fbf8f0; color: #302c25; border: 0; padding: 28px; }");
+    if (m_darkTheme == enabled && !styleSheet().isEmpty()) {
+        update();
+        return;
+    }
+    m_darkTheme = enabled;
+    setStyleSheet(Theme::readerStyleSheet(enabled));
+    update();
 }

@@ -18,7 +18,14 @@ public:
     int selectionStart() const;
     int selectionEnd() const;
     void setDarkTheme(bool enabled);
+    bool darkTheme() const { return m_darkTheme; }
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
 
 signals:
     void positionChanged(int position);
+
+private:
+    bool m_darkTheme = false;
 };
