@@ -7,6 +7,8 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileDialog>
 #include <QFrame>
@@ -17,6 +19,7 @@
 #include <QLineEdit>
 #include <QListView>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
@@ -223,19 +226,18 @@ MainWindow::MainWindow(QWidget *parent)
         if (id.isEmpty()) QMessageBox::warning(this, "导入失败", error);
         refreshShelf();
     });
-    connect(syncButton, &QPushButton::clicked, this, [this] {
-        const QString defaultPath = QSettings().value("sync/folder").toString();
-        const QString path = QFileDialog::getExistingDirectory(this, "选择云同步文件夹", defaultPath);
-        if (path.isEmpty()) return;
-        QString error;
-        if (!m_store.syncFolder(path, &error)) {
-            QMessageBox::warning(this, "同步失败", error);
-        } else {
-            QSettings().setValue("sync/folder", path);
-            statusBar()->showMessage("书架已同步到所选文件夹。", 4000);
-        }
-        refreshShelf();
-    });
+    connect(syncButton, &QPushButton::clicked, this, [this] { runSyncFolder(); });
+    syncButton->setToolTip("从同步文件夹导入新书并自动去重；右键可更换文件夹");
+    syncButton->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(syncButton, &QWidget::customContextMenuRequested, this,
+            [this, syncButton](const QPoint &position) {
+                QMenu menu(syncButton);
+                QAction *importAction = menu.addAction("立即导入");
+                QAction *chooseAction = menu.addAction("更换同步文件夹…");
+                QAction *chosen = menu.exec(syncButton->mapToGlobal(position));
+                if (chosen == importAction) runSyncFolder();
+                else if (chosen == chooseAction) chooseSyncFolder();
+            });
     connect(m_shelf, &QListWidget::itemSelectionChanged, this, [this, openButton] {
         openButton->setEnabled(m_shelf->currentItem() != nullptr);
     });
@@ -447,6 +449,66 @@ void MainWindow::saveCurrentPosition()
     if (!m_store.savePosition(m_currentBookId, m_reader->position(), &error))
         statusBar()->showMessage("阅读进度保存失败：" + error, 4000);
     refreshShelf();
+}
+
+void MainWindow::runSyncFolder()
+{
+    QSettings settings;
+    QString folder = settings.value("sync/sourceFolder").toString();
+    if (folder.isEmpty()) folder = LibraryStore::defaultSyncFolder();
+    while (!QDir(folder).exists()) {
+        folder = QFileDialog::getExistingDirectory(this, "选择同步文件夹", folder);
+        if (folder.isEmpty()) {
+            statusBar()->showMessage("尚未设置同步文件夹，请先选择一个书籍文件夹。", 5000);
+            return;
+        }
+    }
+    settings.setValue("sync/sourceFolder", folder);
+    importSyncFolder(folder);
+}
+
+void MainWindow::chooseSyncFolder()
+{
+    const QString current =
+        QSettings().value("sync/sourceFolder", LibraryStore::defaultSyncFolder()).toString();
+    const QString folder = QFileDialog::getExistingDirectory(this, "选择同步文件夹", current);
+    if (folder.isEmpty()) return;
+    QSettings().setValue("sync/sourceFolder", folder);
+    statusBar()->showMessage(QString("同步文件夹已设为：%1").arg(folder), 5000);
+}
+
+void MainWindow::importSyncFolder(const QString &folderPath)
+{
+    FolderImportSummary summary;
+    QString error;
+    statusBar()->showMessage(QString("正在从同步文件夹导入：%1…").arg(folderPath));
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    const bool imported = m_store.importFolder(folderPath, &summary, &error);
+    QApplication::restoreOverrideCursor();
+    if (!imported) {
+        QMessageBox::warning(this, "同步失败", error);
+        return;
+    }
+    refreshShelf();
+    QString message = summary.imported > 0
+        ? QString("已从同步文件夹导入 %1 本").arg(summary.imported)
+        : QString("同步文件夹中没有新书");
+    if (summary.skippedDuplicates > 0)
+        message += QString("，跳过重复 %1 本").arg(summary.skippedDuplicates);
+    if (summary.removedDuplicates > 0)
+        message += QString("，合并重复 %1 本").arg(summary.removedDuplicates);
+    statusBar()->showMessage(message, 7000);
+    if (summary.failed > 0) {
+        QStringList details = summary.warnings.mid(0, 5);
+        if (summary.warnings.size() > details.size())
+            details.append(QString("…另有 %1 个文件未能导入")
+                               .arg(summary.warnings.size() - details.size()));
+        QMessageBox::warning(this, "部分文件未能导入",
+                             QString("%1 个文件未能导入：\n\n%2")
+                                 .arg(summary.failed)
+                                 .arg(details.join("\n")));
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
