@@ -1,6 +1,9 @@
 #include "librarystore.h"
 
+#include "coverart.h"
+
 #include <QDir>
+#include <QImage>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
@@ -146,6 +149,43 @@ LibraryStore::LibraryStore(QString dataDirectory) : m_dataDirectory(std::move(da
 {
     QDir().mkpath(m_dataDirectory);
     load();
+    ensureCovers();
+}
+
+bool LibraryStore::ensureCovers()
+{
+    bool okay = true;
+    for (const Book &book : m_books) {
+        const QString path = coverPath(book);
+        if (path.isEmpty() || QFileInfo::exists(path)) continue;
+        QImage cover;
+        if (book.storedFileName.endsWith(".epub", Qt::CaseInsensitive)) {
+            EpubDocument document;
+            if (EpubDocument::load(textPath(book), &document, nullptr) && !document.coverData.isEmpty())
+                cover.loadFromData(document.coverData);
+        }
+        if (cover.isNull())
+            cover = CoverArt::renderFallback(book.title.isEmpty() ? QStringLiteral("无名书") : book.title);
+        okay = CoverArt::save(cover, path) && okay;
+    }
+    return okay;
+}
+
+bool LibraryStore::writeCover(const Book &book, const QByteArray &preferredCover, QString *error)
+{
+    QImage cover;
+    if (!preferredCover.isEmpty()) cover.loadFromData(preferredCover);
+    if (cover.isNull())
+        cover = CoverArt::renderFallback(book.title.isEmpty() ? QStringLiteral("无名书") : book.title);
+    if (cover.width() > 1600 || cover.height() > 2200)
+        cover = cover.scaled(1200, 1800, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    return CoverArt::save(cover, coverPath(book), error);
+}
+
+void LibraryStore::removeCover(const Book &book)
+{
+    const QString path = coverPath(book);
+    if (!path.isEmpty()) QFile::remove(path);
 }
 
 QList<Book> LibraryStore::books() const
@@ -198,10 +238,15 @@ QString LibraryStore::importTextFile(const QString &sourcePath, QString *error)
     copy.close();
     Book book{id, QFileInfo(sourcePath).completeBaseName(), storedName, 0,
               static_cast<int>(decoded.size()), {}};
+    if (!writeCover(book, {}, error)) {
+        QFile::remove(copy.fileName());
+        return {};
+    }
     m_books.prepend(book);
     if (!save(error)) {
         m_books.removeFirst();
         QFile::remove(copy.fileName());
+        removeCover(book);
         return {};
     }
     return id;
@@ -234,10 +279,15 @@ QString LibraryStore::importEpubFile(const QString &sourcePath, QString *error)
         book.chapterTitles.append(chapter.title);
         book.chapterOffsets.append(chapter.offset);
     }
+    if (!writeCover(book, document.coverData, error)) {
+        QFile::remove(copy.fileName());
+        return {};
+    }
     m_books.prepend(book);
     if (!save(error)) {
         m_books.removeFirst();
         QFile::remove(copy.fileName());
+        removeCover(book);
         return {};
     }
     return id;
@@ -246,6 +296,12 @@ QString LibraryStore::importEpubFile(const QString &sourcePath, QString *error)
 QString LibraryStore::textPath(const Book &book) const
 {
     return QDir(m_dataDirectory).filePath(book.storedFileName);
+}
+
+QString LibraryStore::coverPath(const Book &book) const
+{
+    if (book.id.isEmpty()) return {};
+    return QDir(m_dataDirectory).filePath(book.id + "-cover.png");
 }
 
 bool LibraryStore::savePosition(const QString &bookId, int position, QString *error)
@@ -308,12 +364,25 @@ bool LibraryStore::syncFolder(const QString &folderPath, QString *error)
     QList<Book> merged = m_books;
     for (int i = 0; i < merged.size(); ++i) mergedIndex.insert(merged.at(i).id, i);
     QDir remoteFiles(QDir(folderPath).filePath("books"));
+    const auto remoteCoverPath = [&remoteFiles](const Book &book) {
+        return remoteFiles.filePath(book.id + "-cover.png");
+    };
+    const auto syncCover = [&](const Book &book, bool preferRemote) {
+        const QString local = coverPath(book);
+        const QString remote = remoteCoverPath(book);
+        if (local.isEmpty() || remote.isEmpty()) return true;
+        if (preferRemote && QFileInfo::exists(remote)) return copyReplacing(remote, local, error, true);
+        if (QFileInfo::exists(local)) return copyReplacing(local, remote, error, true);
+        if (QFileInfo::exists(remote)) return copyReplacing(remote, local, error, true);
+        return true;
+    };
     for (const Book &remote : remoteBooks) {
         const QString localPath = QDir(m_dataDirectory).filePath(remote.storedFileName);
         const QString remotePath = remoteFiles.filePath(remote.storedFileName);
         if (!mergedIndex.contains(remote.id)) {
             Book received = remote;
             if (!copyReplacing(remotePath, localPath, error)) return false;
+            if (!syncCover(received, true)) return false;
             mergedIndex.insert(received.id, merged.size());
             merged.append(received);
             continue;
@@ -329,15 +398,31 @@ bool LibraryStore::syncFolder(const QString &folderPath, QString *error)
         const QString source = remoteNewer ? remotePath : localPath;
         if (!copyReplacing(source, localPath, error, remoteNewer) ||
             !copyReplacing(source, remotePath, error, !remoteNewer)) return false;
+        if (!syncCover(selected, remoteNewer)) return false;
         local = selected;
-    }
-    for (const Book &book : merged) {
-        const QString localPath = QDir(m_dataDirectory).filePath(book.storedFileName);
-        const QString remotePath = remoteFiles.filePath(book.storedFileName);
-        if (!copyReplacing(localPath, remotePath, error)) return false;
     }
     const QList<Book> previousBooks = m_books;
     m_books = merged;
+    // 先同步已有封面（本地缺失时从同步目录取回），再只为两边都没有封面的书生成占位封面。
+    for (const Book &book : m_books) {
+        const QString localPath = QDir(m_dataDirectory).filePath(book.storedFileName);
+        const QString remotePath = remoteFiles.filePath(book.storedFileName);
+        if (!copyReplacing(localPath, remotePath, error)) {
+            m_books = previousBooks;
+            return false;
+        }
+        if (!syncCover(book, false)) {
+            m_books = previousBooks;
+            return false;
+        }
+    }
+    ensureCovers();
+    for (const Book &book : m_books) {
+        if (!syncCover(book, false)) {
+            m_books = previousBooks;
+            return false;
+        }
+    }
     if (!save(error)) {
         m_books = previousBooks;
         return false;

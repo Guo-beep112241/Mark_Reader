@@ -7,12 +7,18 @@ set(CMAKE_AUTOMOC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Test)
 find_package(libzip CONFIG REQUIRED)
 
-add_library(reader_core src/book.cpp src/epubdocument.cpp src/librarystore.cpp)
+add_library(reader_core src/book.cpp src/epubdocument.cpp src/librarystore.cpp
+    src/coverart.cpp src/theme.cpp)
 target_include_directories(reader_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(reader_core PUBLIC Qt6::Core libzip::zip)
+target_link_libraries(reader_core PUBLIC Qt6::Core Qt6::Gui libzip::zip)
 
-add_executable(mark-reader src/main.cpp src/mainwindow.cpp src/readerwidget.cpp)
+add_executable(mark-reader src/main.cpp src/mainwindow.cpp src/readerwidget.cpp src/retrowidgets.cpp)
 target_link_libraries(mark-reader PRIVATE reader_core Qt6::Widgets)
+qt_add_resources(mark-reader "markreader_resources"
+    PREFIX "/theme"
+    BASE resources
+    FILES resources/arrow-down.png resources/arrow-down@2x.png
+)
 
 if(APPLE)
     set_target_properties(mark-reader PROPERTIES
@@ -26,7 +32,7 @@ if(APPLE)
 endif()
 
 enable_testing()
-add_executable(reader_tests tests/test_librarystore.cpp src/readerwidget.cpp)
+add_executable(reader_tests tests/test_librarystore.cpp src/readerwidget.cpp src/retrowidgets.cpp)
 target_link_libraries(reader_tests PRIVATE reader_core Qt6::Widgets Qt6::Test)
 add_test(NAME reader_tests COMMAND reader_tests)
 set_tests_properties(reader_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

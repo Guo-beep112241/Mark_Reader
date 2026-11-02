@@ -10,6 +10,12 @@
 #include <memory>
 
 namespace {
+struct ManifestItem {
+    QString href;
+    QString mediaType;
+    QString properties;
+};
+
 QByteArray readEntry(zip_t *archive, const QString &name, QString *error)
 {
     const QByteArray encodedName = name.toUtf8();
@@ -97,18 +103,28 @@ bool EpubDocument::load(const QString &path, EpubDocument *document, QString *er
     const QByteArray packageData = readEntry(archive.get(), packagePath, error);
     if (packageData.isEmpty()) return false;
     QXmlStreamReader packageXml(packageData);
-    QMap<QString, QString> manifest;
+    QMap<QString, ManifestItem> manifest;
     QStringList spine;
     QString bookTitle;
+    QString coverId;
     while (!packageXml.atEnd()) {
         packageXml.readNext();
         if (!packageXml.isStartElement()) continue;
-        if (packageXml.name() == "title" && bookTitle.isEmpty()) bookTitle = packageXml.readElementText().trimmed();
-        else if (packageXml.name() == "item") {
+        const QString element = packageXml.name().toString();
+        if (element == "title" && bookTitle.isEmpty()) {
+            bookTitle = packageXml.readElementText().trimmed();
+        } else if (element == "item") {
             const auto attributes = packageXml.attributes();
-            manifest.insert(attributes.value("id").toString(), attributes.value("href").toString());
-        } else if (packageXml.name() == "itemref") {
+            manifest.insert(attributes.value("id").toString(),
+                            {attributes.value("href").toString(),
+                             attributes.value("media-type").toString(),
+                             attributes.value("properties").toString()});
+        } else if (element == "itemref") {
             spine.append(packageXml.attributes().value("idref").toString());
+        } else if (element == "meta") {
+            const auto attributes = packageXml.attributes();
+            if (attributes.value("name").toString().compare("cover", Qt::CaseInsensitive) == 0)
+                coverId = attributes.value("content").toString();
         }
     }
     if (packageXml.hasError() || spine.isEmpty()) {
@@ -118,15 +134,41 @@ bool EpubDocument::load(const QString &path, EpubDocument *document, QString *er
     const QString basePath = QFileInfo(packagePath).path();
     EpubDocument parsed;
     parsed.title = bookTitle;
+
+    QString coverHref;
+    if (!coverId.isEmpty() && manifest.contains(coverId)) coverHref = manifest.value(coverId).href;
+    if (coverHref.isEmpty()) {
+        for (auto item = manifest.cbegin(); item != manifest.cend(); ++item) {
+            if (item->properties.split(' ', Qt::SkipEmptyParts).contains("cover-image")) {
+                coverHref = item->href;
+                break;
+            }
+        }
+    }
+    if (coverHref.isEmpty()) {
+        for (auto item = manifest.cbegin(); item != manifest.cend(); ++item) {
+            const QString href = item->href.toLower();
+            if (item->mediaType.startsWith("image/") && href.contains("cover")) {
+                coverHref = item->href;
+                break;
+            }
+        }
+    }
+    if (!coverHref.isEmpty()) {
+        const QString decoded = QUrl::fromPercentEncoding(coverHref.section('#', 0, 0).toUtf8());
+        const QString coverPath = QDir(basePath).filePath(decoded);
+        parsed.coverData = readEntry(archive.get(), QDir::cleanPath(coverPath), nullptr);
+    }
+
     for (const QString &id : spine) {
         if (!manifest.contains(id)) continue;
-        const QString href = manifest.value(id).section('#', 0, 0).section('?', 0, 0);
+        const QString href = manifest.value(id).href.section('#', 0, 0).section('?', 0, 0);
         const QString chapterPath = QDir(basePath).filePath(QUrl::fromPercentEncoding(href.toUtf8()));
         const QByteArray chapterData = readEntry(archive.get(), QDir::cleanPath(chapterPath), error);
         if (chapterData.isEmpty()) return false;
         EpubChapter chapter;
         chapter.text = extractChapterText(chapterData, &chapter.title, error);
-        if (chapter.title.isEmpty()) chapter.title = QFileInfo(manifest.value(id)).completeBaseName();
+        if (chapter.title.isEmpty()) chapter.title = QFileInfo(manifest.value(id).href).completeBaseName();
         if (chapter.text.isEmpty()) continue;
         chapter.offset = parsed.text.size();
         if (!parsed.text.isEmpty()) parsed.text += "\n\n";
