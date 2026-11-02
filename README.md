@@ -41,7 +41,11 @@ macdeployqt "build/Mark Reader.app" -libpath="$(brew --prefix qtsvg)/lib" -no-co
 
 `-no-codesign` 适合本地验证；正式分发还需要代码签名和公证。
 
-书籍副本和 `library.json` 保存在 Qt 的应用数据目录；字号和主题偏好保存在系统应用设置中。同步按钮会把书籍与元数据合并到用户选定的文件夹；可选择 iCloud Drive 等已由系统同步的目录，在另一台设备选择同一目录即可手动同步。该功能不直接连接云服务，也不提供账号认证或后台自动同步。
+书籍副本和 `library.json` 保存在 Qt 的应用数据目录；字号和主题偏好保存在系统应用设置中。“同步文件夹”会把指定文件夹（含子文件夹）里的 TXT/EPUB 导入应用，默认来源是 iCloud Drive 的 `本机迁移/Documents/kindle`；右键按钮可更换文件夹。重复点击只会导入新书，书名和正文高度重复的副本会自动跳过或合并，只保留阅读痕迹最完整的一本。该功能不直接连接云服务，也不提供账号认证或后台自动同步。
+
+| 改造前：同步 = 把书导出到文件夹 | 改造后：同步 = 从文件夹导入新书 |
+| --- | --- |
+| ![改造前的同步](docs/screenshots/sync-before.png) | ![改造后的同步](docs/screenshots/sync-after.png) |
 
 ## 代码导览
 
@@ -50,5 +54,5 @@ macdeployqt "build/Mark Reader.app" -libpath="$(brew --prefix qtsvg)/lib" -no-co
 - `EpubDocument` 读取 EPUB 容器、OPF spine、内嵌封面和 XHTML 章节，抽取纯文本供阅读。
 - `CoverArt` 生成布面精装封面；“封面文件缺失”会在加载书库时自动补回。
 - `Theme` 集中管理纸色、墨色、烫金、宋体字体和全局样式表；`RetroWidgets` 绘制纸张背景与书架封面卡片。
-- `LibraryStore` 导入 TXT/EPUB 应用内副本，以原子 JSON 文件保存书架、阅读进度、书签和批注，并实现同步文件夹合并（含封面文件）。
-- `tests/test_librarystore.cpp` 验证导入、副本、书架重载、阅读进度、书签批注、EPUB 章节与封面、主题样式、封面卡片和同步合并。
+- `LibraryStore` 导入 TXT/EPUB 应用内副本，以原子 JSON 文件保存书架、阅读进度、书签和批注；`importFolder` 从同步文件夹批量导入，并按书名和正文相似度合并重复书籍。
+- `tests/test_librarystore.cpp` 验证导入、副本、书架重载、阅读进度、书签批注、EPUB 章节与封面、主题样式、封面卡片、文件夹导入和重复书籍合并。
