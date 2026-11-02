@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QIcon>
 #include <QImage>
 #include <QListWidget>
 #include <QPainter>
@@ -442,6 +443,14 @@ private slots:
         QVERIFY(!lightSheet.contains("@accent"));
         QVERIFY(!lightSheet.contains("@backdrop"));
         QVERIFY(!lightSheet.contains("@"));
+    }
+
+    void appIconResourceIsBundled()
+    {
+        const QIcon icon(QStringLiteral(":/theme/app-icon.png"));
+        QVERIFY(!icon.isNull());
+        QVERIFY(icon.availableSizes().contains(QSize(1024, 1024)));
+        QVERIFY(!icon.pixmap(128, 128).isNull());
     }
 
     void coverGridDelegatePaintsCards()
