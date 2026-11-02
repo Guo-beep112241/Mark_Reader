@@ -1,6 +1,16 @@
 # Mark Reader
 
-面向 macOS 的 Qt 6 Widgets 电子书阅读器。支持 TXT/EPUB 导入、按最近阅读排序、查看阅读百分比、章节导航、书签、划线批注、全文搜索、深色主题和阅读位置恢复。
+面向 macOS 的 Qt 6 Widgets 电子书阅读器。支持 TXT/EPUB 导入、按最近阅读排序、封面卡片书架、章节导航、书签、划线批注、全文搜索、复古纸页/夜读主题和阅读位置恢复。
+
+## 界面与封面
+
+书架以封面卡片展示藏书：EPUB 优先读取书内声明的封面图；TXT 或没有封面的书会按书名生成一张配色稳定的布面精装封面。旧书库中的书在启动时也会自动补齐封面，同步文件夹会把封面一起复制。
+
+![复古书架](docs/screenshots/shelf-after.png)
+
+阅读页使用羊皮纸底色和宋体排版，工具栏、按钮、下拉框、输入框、滚动条都沿用同一套烫金与暗红配色；右上角“夜读/晨读”可在纸页与暖色夜间主题之间切换。
+
+![复古阅读页](docs/screenshots/reader-after.png)
 
 ## 构建与运行
 
@@ -37,6 +47,8 @@ macdeployqt "build/Mark Reader.app" -libpath="$(brew --prefix qtsvg)/lib" -no-co
 
 - `MainWindow` 管理书架/阅读页切换和按钮交互。
 - `ReaderWidget` 显示纯文本、提供滚动位置并响应字号设置。
-- `EpubDocument` 读取 EPUB 容器、OPF spine 和 XHTML 章节，抽取纯文本供阅读。
-- `LibraryStore` 导入 TXT/EPUB 应用内副本，以原子 JSON 文件保存书架、阅读进度、书签和批注，并实现同步文件夹合并。
-- `tests/test_librarystore.cpp` 验证导入、副本、书架重载、阅读进度、书签批注、EPUB 章节和同步合并。
+- `EpubDocument` 读取 EPUB 容器、OPF spine、内嵌封面和 XHTML 章节，抽取纯文本供阅读。
+- `CoverArt` 生成布面精装封面；“封面文件缺失”会在加载书库时自动补回。
+- `Theme` 集中管理纸色、墨色、烫金、宋体字体和全局样式表；`RetroWidgets` 绘制纸张背景与书架封面卡片。
+- `LibraryStore` 导入 TXT/EPUB 应用内副本，以原子 JSON 文件保存书架、阅读进度、书签和批注，并实现同步文件夹合并（含封面文件）。
+- `tests/test_librarystore.cpp` 验证导入、副本、书架重载、阅读进度、书签批注、EPUB 章节与封面、主题样式、封面卡片和同步合并。
