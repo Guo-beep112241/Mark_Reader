@@ -42,7 +42,13 @@ Palette palette(bool dark);
 QString styleSheet(bool dark);
 QString readerStyleSheet(bool dark);
 QStringList serifFamilies();
+// 阅读字体自定义：只返回本机已安装的候选字体，避免下拉框里出现无法渲染的名字。
+QStringList chineseFontChoices();
+QStringList latinFontChoices();
+QString defaultChineseFamily();
+QString defaultLatinFamily();
 QFont uiFont(int pixelSize, bool bold = false);
+// 阅读器正文默认字体；需要中英文分别设置时由 ReaderWidget 按字符补上英文格式。
 QFont readerFont(int pointSize);
 QColor annotationColor(bool dark);
 

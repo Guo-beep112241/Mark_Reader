@@ -86,6 +86,70 @@ QStringList serifFamilies()
     return selected;
 }
 
+QStringList chineseFontChoices()
+{
+    static const QStringList selected = [] {
+        const QStringList candidates = {
+            QStringLiteral("Songti SC"),
+            QStringLiteral("STSong"),
+            QStringLiteral("Songti TC"),
+            QStringLiteral("Kaiti SC"),
+            QStringLiteral("STKaiti"),
+            QStringLiteral("PingFang SC"),
+            QStringLiteral("Heiti SC"),
+            QStringLiteral("Hiragino Sans GB"),
+            QStringLiteral("Hiragino Mincho ProN"),
+            QStringLiteral("Noto Serif CJK SC"),
+            QStringLiteral("Source Han Serif SC"),
+        };
+        const QStringList installed = QFontDatabase::families();
+        QStringList result;
+        for (const QString &family : candidates) {
+            if (installed.contains(family) && !result.contains(family)) result.append(family);
+        }
+        return result;
+    }();
+    return selected;
+}
+
+QStringList latinFontChoices()
+{
+    static const QStringList selected = [] {
+        const QStringList candidates = {
+            QStringLiteral("Georgia"),
+            QStringLiteral("Times New Roman"),
+            QStringLiteral("Baskerville"),
+            QStringLiteral("Palatino"),
+            QStringLiteral("Charter"),
+            QStringLiteral("Iowan Old Style"),
+            QStringLiteral("Optima"),
+            QStringLiteral("Avenir Next"),
+            QStringLiteral("Garamond"),
+        };
+        const QStringList installed = QFontDatabase::families();
+        QStringList result;
+        for (const QString &family : candidates) {
+            if (installed.contains(family) && !result.contains(family)) result.append(family);
+        }
+        return result;
+    }();
+    return selected;
+}
+
+QString defaultChineseFamily()
+{
+    const QStringList choices = chineseFontChoices();
+    if (!choices.isEmpty()) return choices.first();
+    return serifFamilies().value(0);
+}
+
+QString defaultLatinFamily()
+{
+    const QStringList choices = latinFontChoices();
+    if (!choices.isEmpty()) return choices.first();
+    return serifFamilies().value(0);
+}
+
 QFont uiFont(int pixelSize, bool bold)
 {
     QFont font;
@@ -275,6 +339,67 @@ QLabel#toolLabel { font-size: 12px; color: @muted; }
 QLabel#shelfCount, QLabel#readerFooter { font-size: 12px; color: @muted; }
 QLabel#emptyState { font-size: 16px; color: @muted; }
 
+QFrame#noteSidebar {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 @panelTop, stop:1 @panelBottom);
+    border: 1px solid @border;
+    border-left: 2px solid @gold;
+}
+QLabel#notePanelTitle { font-size: 19px; font-weight: 600; color: @ink; }
+QLabel#notePanelSubtitle { font-size: 10px; color: @gold; }
+QLabel#noteListHeader { font-size: 13px; font-weight: 600; color: @ink; }
+QLabel#noteQuote {
+    color: @ink;
+    background: @field;
+    border-left: 2px solid @gold;
+    padding: 6px 8px;
+}
+QLabel#noteComposerHint, QLabel#noteEmpty { font-size: 11px; color: @muted; }
+QLabel#noteTimestamp { font-size: 11px; color: @gold; }
+QFrame#noteComposer { background: transparent; border: 1px solid @border; border-radius: 3px; }
+QPlainTextEdit#noteEditor {
+    background: @field;
+    color: @ink;
+    border: 1px solid @border;
+    border-radius: 3px;
+    padding: 6px;
+    selection-background-color: @selection;
+    selection-color: @ink;
+}
+QPlainTextEdit#noteEditor:focus { border-color: @gold; }
+QScrollArea#noteScrollArea { background: transparent; border: none; }
+QScrollArea#noteScrollArea > QWidget > QWidget { background: transparent; }
+QFrame#noteCard { background: @field; border: 1px solid @border; border-radius: 3px; }
+QFrame#noteCard:hover { background: @panelTop; border-color: @gold; }
+QLabel#noteCardQuote { color: @ink; font-size: 13px; }
+QLabel#noteCardNote { color: @muted; font-size: 13px; }
+QLabel#noteCardTime { color: @gold; font-size: 10px; }
+QPushButton#noteCloseButton { padding: 1px 7px; min-height: 16px; font-size: 15px; }
+QPushButton#selectionNoteButton {
+    background: @accent;
+    color: @accentInk;
+    border: 1px solid @accentDark;
+    border-bottom: 2px solid @gold;
+    padding: 4px 10px;
+    min-height: 16px;
+    font-size: 12px;
+}
+QPushButton#selectionNoteButton:hover { background: @accentDark; border-color: @gold; }
+
+QLabel#dialogTitle { font-size: 22px; font-weight: 600; color: @ink; }
+QLabel#dialogSubtitle { font-size: 10px; color: @gold; }
+QFrame#fontPreview { background: @field; border: 1px solid @border; border-left: 2px solid @gold; }
+QLabel#fontPreviewChinese, QLabel#fontPreviewLatin { color: @ink; }
+QSpinBox {
+    background: @field;
+    color: @ink;
+    border: 1px solid @border;
+    border-radius: 3px;
+    padding: 6px 10px;
+    min-height: 18px;
+    font-size: 14px;
+}
+QSpinBox:focus { border-color: @gold; }
+
 QFrame#readerFrame { background: transparent; border: 1px solid @border; }
 
 QPushButton {
@@ -302,6 +427,11 @@ QPushButton:disabled {
     background: @disabledPanel;
     color: @disabledInk;
     border-color: @border;
+}
+QPushButton:checked {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 @accent, stop:1 @accentDark);
+    color: @accentInk;
+    border-color: @gold;
 }
 QPushButton#primaryButton {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 @accent, stop:1 @accentDark);

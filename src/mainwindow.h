@@ -10,9 +10,11 @@ class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QPropertyAnimation;
 class QPushButton;
 class QStackedWidget;
 class QTimer;
+class AnnotationPanel;
 class CoverGridDelegate;
 class OrnamentRule;
 class PaperWidget;
@@ -39,6 +41,15 @@ private:
     void importSyncFolder(const QString &folderPath);
     QPixmap coverFor(const Book &book);
 
+    void openSettings();
+    void applyReaderFonts();
+    void setNotePanelVisible(bool visible);
+    void refreshAnnotationPanel();
+    void beginAnnotation();
+    void saveAnnotationFromPanel();
+    void showSelectionNoteButton(const QString &text, int start, int end, const QRect &anchor);
+    void hideSelectionNoteButton();
+
     LibraryStore m_store;
     QListWidget *m_shelf;
     QStackedWidget *m_pages;
@@ -46,14 +57,20 @@ private:
     QTimer *m_saveTimer;
     QComboBox *m_chapters;
     QComboBox *m_bookmarks;
-    QComboBox *m_annotations;
+    QComboBox *m_pageMode;
     QLineEdit *m_searchField;
     QLabel *m_bookTitle;
     QLabel *m_chapterLabel;
     QLabel *m_emptyState;
     QLabel *m_shelfCount;
     QLabel *m_readerFooter;
+    QLabel *m_readerHint;
     QPushButton *m_themeButton;
+    QPushButton *m_notesButton;
+    QPushButton *m_settingsButton;
+    QPushButton *m_selectionNoteButton;
+    AnnotationPanel *m_notePanel;
+    QPropertyAnimation *m_noteAnimation;
     PaperWidget *m_shelfPage;
     PaperWidget *m_readerPage;
     OrnamentRule *m_shelfRule;
@@ -61,6 +78,8 @@ private:
     CoverGridDelegate *m_shelfDelegate;
     QHash<QString, QPixmap> m_coverCache;
     QString m_currentBookId;
+    QString m_chineseFont;
+    QString m_latinFont;
     int m_fontSize = 18;
     bool m_darkTheme = false;
 };

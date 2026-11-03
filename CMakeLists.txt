@@ -12,7 +12,15 @@ add_library(reader_core src/book.cpp src/epubdocument.cpp src/librarystore.cpp
 target_include_directories(reader_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(reader_core PUBLIC Qt6::Core Qt6::Gui libzip::zip)
 
-add_executable(mark-reader src/main.cpp src/mainwindow.cpp src/readerwidget.cpp src/retrowidgets.cpp)
+set(MARKREADER_UI_SOURCES
+    src/mainwindow.cpp
+    src/readerwidget.cpp
+    src/retrowidgets.cpp
+    src/settingsdialog.cpp
+    src/annotationpanel.cpp
+)
+
+add_executable(mark-reader src/main.cpp ${MARKREADER_UI_SOURCES})
 target_link_libraries(mark-reader PRIVATE reader_core Qt6::Widgets)
 set(MARKREADER_RESOURCES
     resources/arrow-down.png
@@ -67,7 +75,7 @@ if(APPLE)
 endif()
 
 enable_testing()
-add_executable(reader_tests tests/test_librarystore.cpp src/readerwidget.cpp src/retrowidgets.cpp)
+add_executable(reader_tests tests/test_librarystore.cpp ${MARKREADER_UI_SOURCES})
 target_link_libraries(reader_tests PRIVATE reader_core Qt6::Widgets Qt6::Test)
 qt_add_resources(reader_tests "markreader_test_resources"
     PREFIX "/theme"

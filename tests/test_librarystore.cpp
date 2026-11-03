@@ -1,19 +1,32 @@
+#include "annotationpanel.h"
 #include "coverart.h"
+#include "mainwindow.h"
 #include "librarystore.h"
 #include "readerwidget.h"
 #include "retrowidgets.h"
+#include "settingsdialog.h"
 #include "theme.h"
 
 #include <QBuffer>
+#include <QComboBox>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFrame>
 #include <QIcon>
 #include <QImage>
 #include <QListWidget>
 #include <QPainter>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QScrollBar>
+#include <QSettings>
+#include <QStandardPaths>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTextCursor>
+#include <QTextDocument>
 #include <QtTest>
 #include <zip.h>
 
@@ -56,6 +69,13 @@ static QByteArray pngBytes(const QImage &image)
     return bytes;
 }
 
+static QPushButton *buttonWithText(QWidget *root, const QString &text)
+{
+    for (QPushButton *button : root->findChildren<QPushButton *>())
+        if (button->text() == text) return button;
+    return nullptr;
+}
+
 static bool writeTextFile(const QString &path, const QByteArray &contents)
 {
     QDir().mkpath(QFileInfo(path).path());
@@ -78,6 +98,13 @@ static QByteArray bookText(const QString &theme, int paragraphs)
 class LibraryStoreTest : public QObject {
     Q_OBJECT
 private slots:
+    void initTestCase()
+    {
+        QStandardPaths::setTestModeEnabled(true);
+        QCoreApplication::setOrganizationName(QStringLiteral("MarkReaderTests"));
+        QCoreApplication::setApplicationName(QStringLiteral("MarkReaderTests"));
+    }
+
     void importsCopiesAndRestoresProgress()
     {
         QTemporaryDir directory;
@@ -117,6 +144,7 @@ private slots:
         QCOMPARE(reopened.books().first().bookmarks.size(), 1);
         QCOMPARE(reopened.books().first().annotations.size(), 1);
         QCOMPARE(reopened.books().first().annotations.first().note, QString("opening word"));
+        QVERIFY(reopened.books().first().annotations.first().createdAt.isValid());
     }
 
     void regeneratesMissingTextBookCoverOnLoad()
@@ -436,6 +464,9 @@ private slots:
         QVERIFY(lightSheet.contains(light.gold.name()));
         QVERIFY(lightSheet.contains("QPushButton"));
         QVERIFY(lightSheet.contains("QComboBox::down-arrow"));
+        QVERIFY(lightSheet.contains("noteSidebar"));
+        QVERIFY(lightSheet.contains("selectionNoteButton"));
+        QVERIFY(darkSheet.contains("noteCard"));
         QVERIFY(darkSheet.contains(dark.ink.name()));
         QVERIFY(darkSheet.contains(dark.backdropTop.name()));
         // 蓝色原生高亮不应再出现，样式表的占位符也必须全部替换。
@@ -451,6 +482,262 @@ private slots:
         QVERIFY(!icon.isNull());
         QVERIFY(icon.availableSizes().contains(QSize(1024, 1024)));
         QVERIFY(!icon.pixmap(128, 128).isNull());
+    }
+
+    void fontChoicesComeFromInstalledFamilies()
+    {
+        const QStringList chinese = Theme::chineseFontChoices();
+        const QStringList latin = Theme::latinFontChoices();
+        QVERIFY(!chinese.isEmpty());
+        QVERIFY(!latin.isEmpty());
+        QVERIFY(!Theme::defaultChineseFamily().isEmpty());
+        QVERIFY(!Theme::defaultLatinFamily().isEmpty());
+        QVERIFY(chinese.contains(Theme::defaultChineseFamily()));
+        QVERIFY(latin.contains(Theme::defaultLatinFamily()));
+        QCOMPARE(Theme::readerFont(18).pointSize(), 18);
+    }
+
+    void readerUsesSeparateChineseAndLatinFonts()
+    {
+        ReaderWidget reader;
+        reader.resize(520, 320);
+        reader.setPlainText(QStringLiteral("汉字测试 abc 123 英文排版"));
+        reader.setReaderFonts(QStringLiteral("Songti SC"), QStringLiteral("Times New Roman"), 18);
+        QCOMPARE(reader.chineseFamily(), QStringLiteral("Songti SC"));
+        QCOMPARE(reader.latinFamily(), QStringLiteral("Times New Roman"));
+
+        const QString plain = reader.document()->toPlainText();
+        QTextCursor cursor(reader.document());
+        cursor.setPosition(plain.indexOf(QStringLiteral("abc")));
+        const QStringList latinFamilies = cursor.charFormat().fontFamilies().toStringList();
+        QVERIFY2(latinFamilies.contains(QStringLiteral("Times New Roman")),
+                 qPrintable(latinFamilies.join(QLatin1Char(','))));
+        cursor.setPosition(plain.indexOf(QStringLiteral("汉")));
+        QVERIFY(cursor.charFormat().fontFamilies().toStringList().contains(QStringLiteral("Songti SC")));
+
+        reader.show();
+        QTest::qWait(30);
+        const QImage songti = reader.grab().toImage();
+        reader.setReaderFonts(QStringLiteral("PingFang SC"), QStringLiteral("Times New Roman"), 18);
+        QTest::qWait(30);
+        const QImage pingFang = reader.grab().toImage();
+        QVERIFY(songti != pingFang);
+        reader.setReaderFonts(QStringLiteral("PingFang SC"), QStringLiteral("Georgia"), 18);
+        QTest::qWait(30);
+        const QImage georgia = reader.grab().toImage();
+        QVERIFY(pingFang != georgia);
+    }
+
+    void readerPageModeTurnsPagesWithKeyboardAndAnimation()
+    {
+        ReaderWidget reader;
+        reader.resize(480, 300);
+        QString text;
+        for (int line = 0; line < 160; ++line)
+            text += QStringLiteral("第%1行：翻页测试正文，用来撑出足够多的页面。\n").arg(line);
+        reader.setPlainText(text);
+        reader.show();
+        QTest::qWait(50);
+        reader.setPageMode(ReaderWidget::PageMode::Page);
+        QTest::qWait(80);
+        QCOMPARE(reader.verticalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+        QVERIFY(reader.pageCount() > 2);
+        QCOMPARE(reader.currentPage(), 1);
+
+        reader.setAnimationsEnabled(false);
+        reader.nextPage();
+        QTest::qWait(20);
+        QCOMPARE(reader.currentPage(), 2);
+        const int secondPagePosition = reader.position();
+        reader.nextPage();
+        QTest::qWait(20);
+        QCOMPARE(reader.currentPage(), 3);
+        reader.previousPage();
+        QTest::qWait(20);
+        QCOMPARE(reader.currentPage(), 2);
+        QCOMPARE(reader.position(), secondPagePosition);
+
+        reader.setAnimationsEnabled(true);
+        reader.setFocus();
+        QTest::keyClick(&reader, Qt::Key_Right);
+        QTRY_COMPARE_WITH_TIMEOUT(reader.currentPage(), 3, 3000);
+        QTest::keyClick(&reader, Qt::Key_Left);
+        QTRY_COMPARE_WITH_TIMEOUT(reader.currentPage(), 2, 3000);
+
+        reader.setAnimationsEnabled(false);
+        for (int guard = 0; guard < 100 && reader.currentPage() < reader.pageCount(); ++guard) {
+            reader.nextPage();
+            QTest::qWait(5);
+        }
+        QCOMPARE(reader.currentPage(), reader.pageCount());
+
+        reader.setPosition(0);
+        reader.setAnimationsEnabled(true);
+        reader.nextPage();
+        QTest::qWait(30);
+        reader.setPosition(0);
+        QTest::qWait(450);
+        QCOMPARE(reader.currentPage(), 1);
+
+        reader.setPageMode(ReaderWidget::PageMode::Scroll);
+        QCOMPARE(reader.verticalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+    }
+
+    void settingsDialogReturnsSelectedFontsAndSize()
+    {
+        SettingsDialog dialog;
+        auto *chinese = dialog.findChild<QComboBox *>(QStringLiteral("chineseFontCombo"));
+        auto *latin = dialog.findChild<QComboBox *>(QStringLiteral("latinFontCombo"));
+        QVERIFY(chinese != nullptr);
+        QVERIFY(latin != nullptr);
+        QVERIFY(chinese->count() >= 2);
+        QVERIFY(latin->count() >= 2);
+
+        const QString chineseFamily = Theme::chineseFontChoices().first();
+        const QString latinFamily = Theme::latinFontChoices().first();
+        dialog.setChineseFont(chineseFamily);
+        dialog.setLatinFont(latinFamily);
+        dialog.setPointSize(24);
+        QCOMPARE(dialog.chineseFont(), chineseFamily);
+        QCOMPARE(dialog.latinFont(), latinFamily);
+        QCOMPARE(dialog.pointSize(), 24);
+
+        dialog.setChineseFont(QStringLiteral("不存在的字体"));
+        QCOMPARE(dialog.chineseFont(), QString());
+    }
+
+    void annotationPanelShowsTimestampsAndSavesSelectedQuote()
+    {
+        AnnotationPanel panel;
+        panel.resize(340, 720);
+        panel.show();
+
+        Annotation first;
+        first.id = QStringLiteral("a");
+        first.start = 4;
+        first.end = 10;
+        first.quote = QStringLiteral("长亭外，古道边");
+        first.note = QStringLiteral("开篇的意境");
+        first.createdAt = QDateTime(QDate(2026, 11, 3), QTime(9, 30));
+        Annotation second;
+        second.id = QStringLiteral("b");
+        second.start = 20;
+        second.end = 26;
+        second.quote = QStringLiteral("晚风拂柳");
+        second.createdAt = QDateTime(QDate(2026, 11, 2), QTime(21, 5));
+        panel.setAnnotations({first, second});
+        QCOMPARE(panel.noteCount(), 2);
+        const QStringList entries = panel.displayedEntries();
+        QVERIFY(entries.at(0).contains(QStringLiteral("2026-11-03 09:30")));
+        QVERIFY(entries.at(0).contains(QStringLiteral("开篇的意境")));
+        QVERIFY(entries.at(1).contains(QStringLiteral("2026-11-02 21:05")));
+
+        const auto cards = panel.findChildren<QFrame *>(QStringLiteral("noteCard"));
+        QCOMPARE(cards.size(), 2);
+        QSignalSpy jump(&panel, &AnnotationPanel::annotationActivated);
+        QTest::mouseClick(cards.first(), Qt::LeftButton, {}, cards.first()->rect().center());
+        QCOMPARE(jump.count(), 1);
+        QCOMPARE(jump.first().at(0).toInt(), 4);
+
+        QSignalSpy save(&panel, &AnnotationPanel::saveRequested);
+        panel.setSelection(4, 10, QStringLiteral("长亭外，古道边"));
+        auto *editor = panel.findChild<QPlainTextEdit *>(QStringLiteral("noteEditor"));
+        auto *saveButton = panel.findChild<QPushButton *>(QStringLiteral("primaryButton"));
+        QVERIFY(editor != nullptr);
+        QVERIFY(saveButton != nullptr);
+        QVERIFY(editor->isEnabled());
+        editor->setPlainText(QStringLiteral("随手记下"));
+        QTest::mouseClick(saveButton, Qt::LeftButton);
+        QCOMPARE(save.count(), 1);
+        QCOMPARE(save.first().at(0).toInt(), 4);
+        QCOMPARE(save.first().at(1).toInt(), 10);
+        QCOMPARE(save.first().at(2).toString(), QStringLiteral("长亭外，古道边"));
+        QCOMPARE(save.first().at(3).toString(), QStringLiteral("随手记下"));
+
+        panel.clearComposer();
+        QCOMPARE(panel.composerStart(), -1);
+        QVERIFY(!editor->isEnabled());
+        QVERIFY(!saveButton->isEnabled());
+    }
+
+    void mainWindowRestoresReaderPreferences()
+    {
+        QSettings settings;
+        settings.clear();
+        settings.setValue(QStringLiteral("reader/chineseFont"), QStringLiteral("PingFang SC"));
+        settings.setValue(QStringLiteral("reader/latinFont"), QStringLiteral("Baskerville"));
+        settings.setValue(QStringLiteral("reader/fontSize"), 20);
+        settings.setValue(QStringLiteral("reader/pageMode"), QStringLiteral("page"));
+
+        MainWindow window;
+        auto *reader = window.findChild<ReaderWidget *>(QStringLiteral("reader"));
+        QVERIFY(reader != nullptr);
+        QCOMPARE(reader->chineseFamily(), QStringLiteral("PingFang SC"));
+        QCOMPARE(reader->latinFamily(), QStringLiteral("Baskerville"));
+        QCOMPARE(reader->pointSize(), 20);
+        QCOMPARE(reader->pageMode(), ReaderWidget::PageMode::Page);
+        settings.clear();
+    }
+
+    void mainWindowSavesSelectionAsTimestampedNote()
+    {
+        const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        QDir(dataDir).removeRecursively();
+        QDir().mkpath(dataDir);
+        QSettings().clear();
+
+        QTemporaryDir sourceDir;
+        QVERIFY(sourceDir.isValid());
+        const QString sourcePath = sourceDir.filePath("integration.txt");
+        const QByteArray contents = QStringLiteral(
+            "第一段用来划词。\n\n第二段用来确认阅读位置和笔记可以一起保存。\n").toUtf8();
+        QVERIFY(writeTextFile(sourcePath, contents));
+        LibraryStore store(dataDir);
+        QString error;
+        QVERIFY2(!store.importTextFile(sourcePath, &error).isEmpty(), qPrintable(error));
+
+        MainWindow window;
+        window.show();
+        QTest::qWait(200);
+        auto *shelf = window.findChild<QListWidget *>(QStringLiteral("shelf"));
+        QVERIFY(shelf != nullptr);
+        QCOMPARE(shelf->count(), 1);
+        shelf->setCurrentRow(0);
+        QTest::qWait(50);
+        QPushButton *open = buttonWithText(&window, QStringLiteral("打开选中"));
+        QVERIFY(open != nullptr);
+        open->click();
+        QTest::qWait(250);
+
+        auto *reader = window.findChild<ReaderWidget *>(QStringLiteral("reader"));
+        QVERIFY(reader != nullptr);
+        reader->selectRange(0, 5);
+        QPushButton *annotate = buttonWithText(&window, QStringLiteral("划词笔记"));
+        QVERIFY(annotate != nullptr);
+        annotate->click();
+        QTest::qWait(350);
+
+        auto *panel = window.findChild<AnnotationPanel *>();
+        QVERIFY(panel != nullptr);
+        auto *editor = panel->findChild<QPlainTextEdit *>(QStringLiteral("noteEditor"));
+        auto *save = panel->findChild<QPushButton *>(QStringLiteral("primaryButton"));
+        QVERIFY(editor != nullptr);
+        QVERIFY(save != nullptr);
+        QVERIFY(editor->isEnabled());
+        editor->setPlainText(QStringLiteral("集成测试笔记"));
+        save->click();
+        QTest::qWait(200);
+
+        LibraryStore reopened(dataDir);
+        QCOMPARE(reopened.books().size(), 1);
+        const Book book = reopened.books().first();
+        QCOMPARE(book.annotations.size(), 1);
+        QCOMPARE(book.annotations.first().quote, QStringLiteral("第一段用来"));
+        QCOMPARE(book.annotations.first().note, QStringLiteral("集成测试笔记"));
+        QVERIFY(book.annotations.first().createdAt.isValid());
+        QCOMPARE(panel->noteCount(), 1);
+        QVERIFY(panel->displayedEntries().first().contains(QStringLiteral("记于 ")));
+        QVERIFY(panel->displayedEntries().first().contains(QStringLiteral("集成测试笔记")));
     }
 
     void coverGridDelegatePaintsCards()
