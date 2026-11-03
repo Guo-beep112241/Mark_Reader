@@ -68,11 +68,18 @@ MainWindow::MainWindow(QWidget *parent)
     headerRow->addStretch(1);
     auto *syncButton = new QPushButton("同步文件夹");
     auto *openButton = new QPushButton("打开选中");
+    auto *removeButton = new QPushButton("从书架移除");
     auto *importButton = new QPushButton("导入书籍");
     importButton->setObjectName("primaryButton");
+    importButton->setToolTip("支持 EPUB 和 UTF-8 编码的 TXT；GBK/GB18030 请先另存为 UTF-8");
+    removeButton->setToolTip("从书架移除选中的书，不会删除原文件");
     openButton->setEnabled(false);
+    removeButton->setEnabled(false);
+    m_openButton = openButton;
+    m_removeButton = removeButton;
     headerRow->addWidget(syncButton, 0, Qt::AlignBottom);
     headerRow->addWidget(openButton, 0, Qt::AlignBottom);
+    headerRow->addWidget(removeButton, 0, Qt::AlignBottom);
     headerRow->addWidget(importButton, 0, Qt::AlignBottom);
     shelfLayout->addLayout(headerRow);
     shelfLayout->addSpacing(10);
@@ -238,10 +245,13 @@ MainWindow::MainWindow(QWidget *parent)
                 if (chosen == importAction) runSyncFolder();
                 else if (chosen == chooseAction) chooseSyncFolder();
             });
-    connect(m_shelf, &QListWidget::itemSelectionChanged, this, [this, openButton] {
-        openButton->setEnabled(m_shelf->currentItem() != nullptr);
+    connect(m_shelf, &QListWidget::itemSelectionChanged, this, [this] {
+        const bool hasSelection = m_shelf->currentItem() != nullptr;
+        m_openButton->setEnabled(hasSelection);
+        m_removeButton->setEnabled(hasSelection);
     });
     connect(openButton, &QPushButton::clicked, this, [this] { openBook(m_shelf->currentRow()); });
+    connect(removeButton, &QPushButton::clicked, this, [this] { removeSelectedBook(); });
     connect(m_shelf, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
         openBook(m_shelf->row(item));
     });
@@ -379,6 +389,9 @@ void MainWindow::refreshShelf()
     m_shelfCount->setVisible(!empty);
     m_shelfCount->setText(empty ? QString()
                                 : QString("共 %1 册 · 点击封面开始阅读").arg(books.size()));
+    const bool hasSelection = m_shelf->currentItem() != nullptr;
+    m_openButton->setEnabled(hasSelection);
+    m_removeButton->setEnabled(hasSelection);
 }
 
 void MainWindow::reloadReaderMetadata(const Book &book)
@@ -431,6 +444,53 @@ void MainWindow::openBook(int row)
     QString error;
     m_store.savePosition(book.id, book.position, &error);
     refreshShelf();
+}
+
+void MainWindow::removeSelectedBook()
+{
+    QListWidgetItem *item = m_shelf->currentItem();
+    if (!item) return;
+    const QString bookId = item->data(Qt::UserRole).toString();
+    QString title = item->text();
+    for (const Book &book : m_store.books()) {
+        if (book.id == bookId) {
+            title = book.title;
+            break;
+        }
+    }
+
+    QMessageBox confirmation(this);
+    confirmation.setIcon(QMessageBox::Question);
+    confirmation.setWindowTitle("从书架移除");
+    confirmation.setText(QString("确定要从书架移除《%1》吗？").arg(title));
+    confirmation.setInformativeText("应用内的书籍副本、书签和批注会一起删除；原文件不受影响。");
+    QPushButton *confirm = confirmation.addButton("移除", QMessageBox::DestructiveRole);
+    QPushButton *cancel = confirmation.addButton("取消", QMessageBox::RejectRole);
+    confirmation.setDefaultButton(cancel);
+    confirmation.exec();
+    if (confirmation.clickedButton() != confirm) return;
+
+    QString error;
+    if (!m_store.removeBook(bookId, &error)) {
+        QMessageBox::warning(this, "移除失败", error);
+        return;
+    }
+    m_coverCache.remove(bookId);
+    if (m_currentBookId == bookId) {
+        m_saveTimer->stop();
+        m_currentBookId.clear();
+        m_reader->setPlainText(QString());
+        m_reader->showAnnotations(QList<Annotation>(), m_darkTheme);
+        m_bookTitle->setText("选择一本书");
+        m_chapters->clear();
+        m_bookmarks->clear();
+        m_annotations->clear();
+        m_chapters->setVisible(false);
+        m_chapterLabel->setVisible(false);
+        updateReaderFooter();
+    }
+    refreshShelf();
+    statusBar()->showMessage(QString("已从书架移除《%1》").arg(title), 5000);
 }
 
 void MainWindow::updateReaderFooter()
