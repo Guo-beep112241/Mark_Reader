@@ -2,14 +2,16 @@
 
 #include "coverart.h"
 
+#include <QCryptographicHash>
 #include <QDir>
+#include <QDirIterator>
 #include <QImage>
 #include <QFile>
 #include <QFileInfo>
-#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
 #include <QUuid>
@@ -110,26 +112,6 @@ bool writeLibrary(const QString &path, const QList<Book> &books, QString *error)
     return true;
 }
 
-bool copyReplacing(const QString &source, const QString &target, QString *error, bool force = false)
-{
-    if (!QFileInfo::exists(source)) {
-        if (error) *error = QStringLiteral("同步所需的书籍文件不存在：%1").arg(source);
-        return false;
-    }
-    if (QFileInfo(source).absoluteFilePath() == QFileInfo(target).absoluteFilePath()) return true;
-    if (!force && QFileInfo::exists(target) && QFileInfo(source).lastModified() <= QFileInfo(target).lastModified()) return true;
-    if (QFileInfo::exists(target) && !QFile::remove(target)) {
-        if (error) *error = QStringLiteral("无法更新同步目录中的文件：%1").arg(target);
-        return false;
-    }
-    QDir().mkpath(QFileInfo(target).path());
-    if (!QFile::copy(source, target)) {
-        if (error) *error = QStringLiteral("无法复制同步文件：%1").arg(target);
-        return false;
-    }
-    return true;
-}
-
 void mergeEntries(QList<Bookmark> &target, const QList<Bookmark> &source)
 {
     QSet<QString> ids;
@@ -142,6 +124,143 @@ void mergeEntries(QList<Annotation> &target, const QList<Annotation> &source)
     QSet<QString> ids;
     for (const auto &entry : target) ids.insert(entry.id);
     for (const auto &entry : source) if (!ids.contains(entry.id)) target.append(entry);
+}
+
+// 判断两本书是否重复的门槛：书名要足够接近，正文也要大量重合。
+constexpr double kTitleSimilarityThreshold = 0.82;
+constexpr double kContentSimilarityThreshold = 0.85;
+
+struct ContentSignature {
+    QByteArray digest;
+    QSet<quint64> shingles;
+    bool usable = false;
+};
+
+// 去掉“（1）”“副本”“copy”这类复制文件名后缀，避免同一本书因重复下载被判成不同书。
+QString withoutCopySuffix(QString title)
+{
+    static const QRegularExpression numbered(QStringLiteral("\\s*[（(]\\s*\\d+\\s*[)）]\\s*$"));
+    static const QRegularExpression bracketed(
+        QStringLiteral("\\s*[（(]\\s*(?:副本|拷贝|copy)\\s*[)）]\\s*$"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression separated(
+        QStringLiteral("\\s*[-_—·]\\s*(?:副本|拷贝|copy)\\s*$"),
+        QRegularExpression::CaseInsensitiveOption);
+    title.remove(numbered);
+    title.remove(bracketed);
+    title.remove(separated);
+    return title.trimmed();
+}
+
+QString normalizedTitle(const QString &title)
+{
+    const QString folded =
+        withoutCopySuffix(title).normalized(QString::NormalizationForm_KC).toCaseFolded();
+    QString key;
+    key.reserve(folded.size());
+    for (const QChar character : folded)
+        if (character.isLetterOrNumber()) key.append(character);
+    return key;
+}
+
+// 用字符二元组的 Dice 系数衡量书名相似度，能容忍标点、副标题和复制后缀的差异。
+// 归一化后的书名可以缓存，比较时直接传入，避免每次两两比较都重新计算。
+double normalizedTitleSimilarity(const QString &first, const QString &second)
+{
+    if (first.isEmpty() || second.isEmpty()) return 0.0;
+    if (first == second) return 1.0;
+    if (first.size() < 2 || second.size() < 2) return 0.0;
+    QSet<QString> firstPairs;
+    QSet<QString> secondPairs;
+    for (int i = 0; i + 1 < first.size(); ++i) firstPairs.insert(first.mid(i, 2));
+    for (int i = 0; i + 1 < second.size(); ++i) secondPairs.insert(second.mid(i, 2));
+    int shared = 0;
+    for (const QString &pair : firstPairs)
+        if (secondPairs.contains(pair)) ++shared;
+    return 2.0 * shared / (firstPairs.size() + secondPairs.size());
+}
+
+// 正文去掉空白后取整段 SHA-256，再按内容本身采样若干 32 字片段。
+// 整段相同说明是完全相同的副本；片段大量重合说明只是前后多了一点内容，
+// 用内容决定采样位置可以避免插入几行文字后所有特征全部错位。
+ContentSignature signatureForText(const QString &text)
+{
+    ContentSignature signature;
+    const QString normalized = text.normalized(QString::NormalizationForm_KC);
+    QString compact;
+    compact.reserve(normalized.size());
+    for (const QChar character : normalized)
+        if (!character.isSpace()) compact.append(character);
+    if (compact.isEmpty()) return signature;
+    signature.digest = QCryptographicHash::hash(compact.toUtf8(), QCryptographicHash::Sha256);
+    constexpr int kShingleLength = 32;
+    constexpr quint64 kShingleBase = 1315423911ull;
+    if (compact.size() <= kShingleLength * 2) {
+        signature.shingles.insert(qHash(compact));
+    } else {
+        quint64 power = 1;
+        for (int i = 1; i < kShingleLength; ++i) power *= kShingleBase;
+        quint64 rolling = 0;
+        for (int i = 0; i < kShingleLength; ++i)
+            rolling = rolling * kShingleBase + static_cast<quint64>(compact.at(i).unicode());
+        for (int start = 0; start + kShingleLength <= compact.size(); ++start) {
+            if (start > 0) {
+                rolling = (rolling - static_cast<quint64>(compact.at(start - 1).unicode()) * power)
+                        * kShingleBase
+                        + static_cast<quint64>(compact.at(start + kShingleLength - 1).unicode());
+            }
+            const quint64 mixed = rolling * 0x9E3779B97F4A7C15ull;
+            if ((mixed >> 58) == 0) signature.shingles.insert(mixed);
+        }
+        if (signature.shingles.isEmpty()) signature.shingles.insert(qHash(compact));
+    }
+    signature.usable = true;
+    return signature;
+}
+
+ContentSignature signatureForBook(const QString &path)
+{
+    if (path.endsWith(".epub", Qt::CaseInsensitive)) {
+        EpubDocument document;
+        if (!EpubDocument::load(path, &document, nullptr)) return {};
+        return signatureForText(document.text);
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    return signatureForText(QString::fromUtf8(file.readAll()));
+}
+
+double contentSimilarity(const ContentSignature &left, const ContentSignature &right)
+{
+    if (!left.usable || !right.usable) return 0.0;
+    if (left.digest == right.digest) return 1.0;
+    if (left.shingles.isEmpty() || right.shingles.isEmpty()) return 0.0;
+    int shared = 0;
+    for (const quint64 shingle : left.shingles)
+        if (right.shingles.contains(shingle)) ++shared;
+    return 2.0 * shared / (left.shingles.size() + right.shingles.size());
+}
+
+// 合并重复书籍时，优先留下读得更久、笔记更多的那一本，用户不会丢掉阅读痕迹。
+bool keepsBetterReadingTrail(const Book &candidate, const Book &current)
+{
+    if (candidate.lastRead.isValid() != current.lastRead.isValid()) return candidate.lastRead.isValid();
+    if (candidate.lastRead != current.lastRead) return candidate.lastRead > current.lastRead;
+    if (candidate.position != current.position) return candidate.position > current.position;
+    const int candidateMarks = candidate.bookmarks.size() + candidate.annotations.size();
+    const int currentMarks = current.bookmarks.size() + current.annotations.size();
+    return candidateMarks > currentMarks;
+}
+
+void absorbBook(Book &keeper, const Book &loser, bool identicalContent)
+{
+    mergeEntries(keeper.bookmarks, loser.bookmarks);
+    mergeEntries(keeper.annotations, loser.annotations);
+    if (!keeper.lastRead.isValid() || (loser.lastRead.isValid() && loser.lastRead > keeper.lastRead))
+        keeper.lastRead = loser.lastRead;
+    keeper.characterCount = qMax(keeper.characterCount, loser.characterCount);
+    // 正文完全相同时阅读位置可以直接取较靠后的一个；正文有差异时保留 keeper 的位置。
+    if (identicalContent) keeper.position = qMax(keeper.position, loser.position);
 }
 }
 
@@ -228,28 +347,10 @@ QString LibraryStore::importTextFile(const QString &sourcePath, QString *error)
         if (error) *error = QStringLiteral("文件不是有效的 UTF-8 文本，暂不支持导入。");
         return {};
     }
-    const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString storedName = id + ".txt";
-    QFile copy(QDir(m_dataDirectory).filePath(storedName));
-    if (!copy.open(QIODevice::WriteOnly) || copy.write(contents) != contents.size()) {
-        if (error) *error = copy.errorString();
-        return {};
-    }
-    copy.close();
-    Book book{id, QFileInfo(sourcePath).completeBaseName(), storedName, 0,
-              static_cast<int>(decoded.size()), {}};
-    if (!writeCover(book, {}, error)) {
-        QFile::remove(copy.fileName());
-        return {};
-    }
-    m_books.prepend(book);
-    if (!save(error)) {
-        m_books.removeFirst();
-        QFile::remove(copy.fileName());
-        removeCover(book);
-        return {};
-    }
-    return id;
+    Book book;
+    book.title = QFileInfo(sourcePath).completeBaseName();
+    book.characterCount = static_cast<int>(decoded.size());
+    return insertBook(book, QStringLiteral(".txt"), contents, {}, error);
 }
 
 QString LibraryStore::importEpubFile(const QString &sourcePath, QString *error)
@@ -262,24 +363,31 @@ QString LibraryStore::importEpubFile(const QString &sourcePath, QString *error)
         return {};
     }
     const QByteArray contents = source.readAll();
+    Book book;
+    book.title = document.title.trimmed().isEmpty() ? QFileInfo(sourcePath).completeBaseName()
+                                                    : document.title;
+    book.characterCount = document.text.size();
+    for (const auto &chapter : document.chapters) {
+        book.chapterTitles.append(chapter.title);
+        book.chapterOffsets.append(chapter.offset);
+    }
+    return insertBook(book, QStringLiteral(".epub"), contents, document.coverData, error);
+}
+
+QString LibraryStore::insertBook(Book book, const QString &suffix, const QByteArray &contents,
+                                 const QByteArray &coverData, QString *error)
+{
     const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString storedName = id + ".epub";
+    const QString storedName = id + suffix;
     QFile copy(QDir(m_dataDirectory).filePath(storedName));
     if (!copy.open(QIODevice::WriteOnly) || copy.write(contents) != contents.size()) {
         if (error) *error = copy.errorString();
         return {};
     }
     copy.close();
-    Book book;
     book.id = id;
-    book.title = document.title;
     book.storedFileName = storedName;
-    book.characterCount = document.text.size();
-    for (const auto &chapter : document.chapters) {
-        book.chapterTitles.append(chapter.title);
-        book.chapterOffsets.append(chapter.offset);
-    }
-    if (!writeCover(book, document.coverData, error)) {
+    if (!writeCover(book, coverData, error)) {
         QFile::remove(copy.fileName());
         return {};
     }
@@ -347,85 +455,218 @@ bool LibraryStore::addAnnotation(const QString &bookId, int start, int end, cons
     return false;
 }
 
-bool LibraryStore::syncFolder(const QString &folderPath, QString *error)
+QString LibraryStore::defaultSyncFolder()
 {
-    if (folderPath.isEmpty() || !QDir().mkpath(QDir(folderPath).filePath("books"))) {
-        if (error) *error = QStringLiteral("无法创建同步文件夹。");
+    return QDir::home().filePath(
+        QStringLiteral("Library/Mobile Documents/com~apple~CloudDocs/本机迁移/Documents/kindle"));
+}
+
+bool LibraryStore::importFolder(const QString &folderPath, FolderImportSummary *summary, QString *error)
+{
+    FolderImportSummary collected;
+    if (folderPath.isEmpty() || !QDir(folderPath).exists()) {
+        if (error) *error = QStringLiteral("同步文件夹不存在：%1").arg(folderPath);
+        if (summary) *summary = collected;
         return false;
     }
-    const QString remoteLibrary = QDir(folderPath).filePath("library.json");
-    QString remoteError;
-    QList<Book> remoteBooks = readLibrary(remoteLibrary, &remoteError);
-    if (!remoteError.isEmpty()) {
-        if (error) *error = remoteError;
-        return false;
+
+    QStringList paths;
+    QDirIterator iterator(folderPath, QDir::Files | QDir::Readable, QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        const QString path = iterator.next();
+        const QString suffix = QFileInfo(path).suffix().toLower();
+        if (suffix != QStringLiteral("txt") && suffix != QStringLiteral("epub")) continue;
+        // 旧版“同步文件夹”会把应用内副本导出成 <UUID>.txt/.epub，不要把它们当新书再导入。
+        if (!QUuid::fromString(QFileInfo(path).completeBaseName()).isNull()) continue;
+        paths.append(path);
     }
-    QHash<QString, int> mergedIndex;
-    QList<Book> merged = m_books;
-    for (int i = 0; i < merged.size(); ++i) mergedIndex.insert(merged.at(i).id, i);
-    QDir remoteFiles(QDir(folderPath).filePath("books"));
-    const auto remoteCoverPath = [&remoteFiles](const Book &book) {
-        return remoteFiles.filePath(book.id + "-cover.png");
+    paths.sort();
+
+    // 书库中已有书的正文特征按需计算：只有书名相近时才需要比较正文。
+    struct KnownBook {
+        Book book;
+        QString titleKey;
+        ContentSignature signature;
+        bool signatureReady = false;
     };
-    const auto syncCover = [&](const Book &book, bool preferRemote) {
-        const QString local = coverPath(book);
-        const QString remote = remoteCoverPath(book);
-        if (local.isEmpty() || remote.isEmpty()) return true;
-        if (preferRemote && QFileInfo::exists(remote)) return copyReplacing(remote, local, error, true);
-        if (QFileInfo::exists(local)) return copyReplacing(local, remote, error, true);
-        if (QFileInfo::exists(remote)) return copyReplacing(remote, local, error, true);
-        return true;
+    QList<KnownBook> known;
+    known.reserve(m_books.size());
+    for (const Book &book : m_books) known.append({book, normalizedTitle(book.title), {}, false});
+    const auto knownSignature = [this](KnownBook &entry) -> const ContentSignature & {
+        if (!entry.signatureReady) {
+            entry.signature = signatureForBook(textPath(entry.book));
+            entry.signatureReady = true;
+        }
+        return entry.signature;
     };
-    for (const Book &remote : remoteBooks) {
-        const QString localPath = QDir(m_dataDirectory).filePath(remote.storedFileName);
-        const QString remotePath = remoteFiles.filePath(remote.storedFileName);
-        if (!mergedIndex.contains(remote.id)) {
-            Book received = remote;
-            if (!copyReplacing(remotePath, localPath, error)) return false;
-            if (!syncCover(received, true)) return false;
-            mergedIndex.insert(received.id, merged.size());
-            merged.append(received);
+
+    for (const QString &path : paths) {
+        const bool epub = QFileInfo(path).suffix().compare("epub", Qt::CaseInsensitive) == 0;
+        const QString fileName = QFileInfo(path).fileName();
+        Book book;
+        QString candidateText;
+        QByteArray contents;
+        QByteArray cover;
+        if (epub) {
+            EpubDocument document;
+            QString loadError;
+            if (!EpubDocument::load(path, &document, &loadError)) {
+                ++collected.failed;
+                collected.warnings.append(QStringLiteral("%1：%2").arg(fileName, loadError));
+                continue;
+            }
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly)) {
+                ++collected.failed;
+                collected.warnings.append(QStringLiteral("%1：%2").arg(fileName, file.errorString()));
+                continue;
+            }
+            contents = file.readAll();
+            book.title = document.title.trimmed().isEmpty() ? QFileInfo(path).completeBaseName()
+                                                            : document.title;
+            book.characterCount = static_cast<int>(document.text.size());
+            for (const EpubChapter &chapter : document.chapters) {
+                book.chapterTitles.append(chapter.title);
+                book.chapterOffsets.append(chapter.offset);
+            }
+            cover = document.coverData;
+            candidateText = document.text;
+        } else {
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly)) {
+                ++collected.failed;
+                collected.warnings.append(QStringLiteral("%1：%2").arg(fileName, file.errorString()));
+                continue;
+            }
+            contents = file.readAll();
+            const QString decoded = QString::fromUtf8(contents.constData(), contents.size());
+            if (contents.isEmpty() || decoded.toUtf8() != contents) {
+                ++collected.failed;
+                collected.warnings.append(
+                    QStringLiteral("%1：不是有效的 UTF-8 文本").arg(fileName));
+                continue;
+            }
+            book.title = QFileInfo(path).completeBaseName();
+            book.characterCount = static_cast<int>(decoded.size());
+            candidateText = decoded;
+        }
+
+        const QString titleKey = normalizedTitle(book.title);
+        bool sameTitle = false;
+        for (const KnownBook &entry : known) {
+            if (normalizedTitleSimilarity(titleKey, entry.titleKey) < kTitleSimilarityThreshold) continue;
+            sameTitle = true;
+            break;
+        }
+        bool duplicate = false;
+        if (sameTitle) {
+            const ContentSignature signature = signatureForText(candidateText);
+            if (signature.usable) {
+                for (KnownBook &entry : known) {
+                    if (normalizedTitleSimilarity(titleKey, entry.titleKey) < kTitleSimilarityThreshold) continue;
+                    if (contentSimilarity(signature, knownSignature(entry)) < kContentSimilarityThreshold) continue;
+                    duplicate = true;
+                    break;
+                }
+            }
+        }
+        if (duplicate) {
+            ++collected.skippedDuplicates;
             continue;
         }
-        Book &local = merged[mergedIndex.value(remote.id)];
-        const bool remoteNewer = remote.lastRead.isValid() &&
-            (!local.lastRead.isValid() || remote.lastRead > local.lastRead);
-        Book selected = remoteNewer ? remote : local;
-        mergeEntries(selected.bookmarks, remote.bookmarks);
-        mergeEntries(selected.bookmarks, local.bookmarks);
-        mergeEntries(selected.annotations, remote.annotations);
-        mergeEntries(selected.annotations, local.annotations);
-        const QString source = remoteNewer ? remotePath : localPath;
-        if (!copyReplacing(source, localPath, error, remoteNewer) ||
-            !copyReplacing(source, remotePath, error, !remoteNewer)) return false;
-        if (!syncCover(selected, remoteNewer)) return false;
-        local = selected;
+
+        QString insertError;
+        const QString id = insertBook(book, epub ? QStringLiteral(".epub") : QStringLiteral(".txt"),
+                                      contents, cover, &insertError);
+        if (id.isEmpty()) {
+            ++collected.failed;
+            collected.warnings.append(QStringLiteral("%1：%2").arg(fileName, insertError));
+            continue;
+        }
+        ++collected.imported;
+        known.append({m_books.first(), titleKey, {}, false});
     }
+
+    int removed = 0;
+    QString dedupeError;
+    if (!mergeDuplicates(&removed, &dedupeError)) {
+        if (error) *error = dedupeError;
+        if (summary) *summary = collected;
+        return false;
+    }
+    collected.removedDuplicates = removed;
+    if (summary) *summary = collected;
+    return true;
+}
+
+int LibraryStore::dedupe(QString *error)
+{
+    int removed = 0;
+    if (!mergeDuplicates(&removed, error)) return -1;
+    return removed;
+}
+
+bool LibraryStore::mergeDuplicates(int *removedCount, QString *error)
+{
     const QList<Book> previousBooks = m_books;
-    m_books = merged;
-    // 先同步已有封面（本地缺失时从同步目录取回），再只为两边都没有封面的书生成占位封面。
-    for (const Book &book : m_books) {
-        const QString localPath = QDir(m_dataDirectory).filePath(book.storedFileName);
-        const QString remotePath = remoteFiles.filePath(book.storedFileName);
-        if (!copyReplacing(localPath, remotePath, error)) {
-            m_books = previousBooks;
-            return false;
+    QList<Book> books = m_books;
+    QList<QString> titleKeys;
+    titleKeys.reserve(books.size());
+    for (const Book &book : books) titleKeys.append(normalizedTitle(book.title));
+    QList<ContentSignature> signatures(books.size());
+    QList<bool> signatureReady(books.size(), false);
+    const auto signatureAt = [this, &books, &signatures, &signatureReady](int index)
+        -> const ContentSignature & {
+        if (!signatureReady.at(index)) {
+            signatures[index] = signatureForBook(textPath(books.at(index)));
+            signatureReady[index] = true;
         }
-        if (!syncCover(book, false)) {
-            m_books = previousBooks;
-            return false;
+        return signatures.at(index);
+    };
+
+    QList<bool> absorbed(books.size(), false);
+    int removed = 0;
+    for (int i = 0; i < books.size(); ++i) {
+        if (absorbed.at(i)) continue;
+        for (int j = i + 1; j < books.size(); ++j) {
+            if (absorbed.at(j)) continue;
+            if (normalizedTitleSimilarity(titleKeys.at(i), titleKeys.at(j)) < kTitleSimilarityThreshold) continue;
+            const ContentSignature &first = signatureAt(i);
+            const ContentSignature &second = signatureAt(j);
+            if (!first.usable || !second.usable) continue;
+            if (contentSimilarity(first, second) < kContentSimilarityThreshold) continue;
+            if (keepsBetterReadingTrail(books.at(j), books.at(i))) {
+                books.swapItemsAt(i, j);
+                titleKeys.swapItemsAt(i, j);
+                signatures.swapItemsAt(i, j);
+                signatureReady.swapItemsAt(i, j);
+            }
+            absorbBook(books[i], books.at(j), signatures.at(i).digest == signatures.at(j).digest);
+            absorbed[j] = true;
+            ++removed;
         }
     }
+    if (removed == 0) {
+        if (removedCount) *removedCount = 0;
+        return true;
+    }
+
+    QList<Book> kept;
+    QList<Book> discarded;
+    for (int i = 0; i < books.size(); ++i) {
+        if (absorbed.at(i)) discarded.append(books.at(i));
+        else kept.append(books.at(i));
+    }
+    m_books = kept;
     ensureCovers();
-    for (const Book &book : m_books) {
-        if (!syncCover(book, false)) {
-            m_books = previousBooks;
-            return false;
-        }
-    }
     if (!save(error)) {
         m_books = previousBooks;
         return false;
     }
-    return writeLibrary(remoteLibrary, m_books, error);
+    for (const Book &book : discarded) {
+        QFile::remove(QDir(m_dataDirectory).filePath(book.storedFileName));
+        removeCover(book);
+    }
+    if (removedCount) *removedCount = removed;
+    return true;
 }

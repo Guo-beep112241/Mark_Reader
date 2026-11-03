@@ -7,6 +7,7 @@
 #include <QBuffer>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QIcon>
 #include <QImage>
 #include <QListWidget>
@@ -53,6 +54,25 @@ static QByteArray pngBytes(const QImage &image)
     buffer.open(QIODevice::WriteOnly);
     image.save(&buffer, "PNG");
     return bytes;
+}
+
+static bool writeTextFile(const QString &path, const QByteArray &contents)
+{
+    QDir().mkpath(QFileInfo(path).path());
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly) && file.write(contents) == contents.size();
+}
+
+// 生成多段带主题词的正文，让不同主题的书在分片特征上没有重合。
+static QByteArray bookText(const QString &theme, int paragraphs)
+{
+    QString text;
+    for (int index = 0; index < paragraphs; ++index) {
+        text += QStringLiteral("%1第%2段：%1的故事从这里开始，人物、时间与地点都随段落变化。\n")
+                    .arg(theme)
+                    .arg(index);
+    }
+    return text.toUtf8();
 }
 
 class LibraryStoreTest : public QObject {
@@ -238,35 +258,150 @@ private slots:
         QVERIFY(!parsed.coverData.isEmpty());
     }
 
-    void syncFolderMergesBooksAndReadingProgress()
+    void importsFolderRecursivelyAndSkipsDuplicates()
     {
         QTemporaryDir directory;
-        const QString sourcePath = directory.filePath("cloud.txt");
-        QFile source(sourcePath);
-        QVERIFY(source.open(QIODevice::WriteOnly));
-        source.write("A book for syncing across devices.");
-        source.close();
-        LibraryStore first(directory.filePath("device-one"));
-        LibraryStore second(directory.filePath("device-two"));
+        const QString sync = directory.filePath("kindle");
+        QVERIFY(writeTextFile(sync + "/城南旧事.txt", bookText("城南旧事", 30)));
+        QVERIFY(writeTextFile(sync + "/子目录/人间词话.txt", bookText("人间词话", 30)));
+        QVERIFY(writeTextFile(sync + "/notes.md", "not a book"));
+        QVERIFY(writeTextFile(sync + "/empty.txt", QByteArray()));
+        QVERIFY(writeTextFile(sync + "/invalid.txt", QByteArray::fromHex("fffe")));
+        QVERIFY(writeTextFile(sync + "/books/00000000-0000-0000-0000-000000000001.txt",
+                              bookText(QStringLiteral("旧版导出的副本"), 20)));
+        QVERIFY(createEpub(sync + "/子目录/sample.epub"));
+
+        LibraryStore store(directory.filePath("app"));
+        FolderImportSummary summary;
         QString error;
-        const QString id = first.importTextFile(sourcePath, &error);
-        QVERIFY2(!id.isEmpty(), qPrintable(error));
-        const QString cloud = directory.filePath("cloud-folder");
-        QVERIFY2(first.syncFolder(cloud, &error), qPrintable(error));
-        QVERIFY2(second.syncFolder(cloud, &error), qPrintable(error));
-        QCOMPARE(second.books().size(), 1);
-        QVERIFY(QFile::exists(second.textPath(second.books().first())));
-        QVERIFY(QFile::exists(second.coverPath(second.books().first())));
-        QVERIFY(QFile::exists(QDir(cloud).filePath("books/" + id + "-cover.png")));
-        QVERIFY(second.savePosition(id, 10, &error));
-        QVERIFY2(second.syncFolder(cloud, &error), qPrintable(error));
-        QVERIFY2(first.syncFolder(cloud, &error), qPrintable(error));
-        QCOMPARE(first.books().first().position, 10);
-        // 本地封面缺失时应从同步目录恢复，而不是用占位封面覆盖远端。
-        const Book synced = second.books().first();
-        QVERIFY(QFile::remove(second.coverPath(synced)));
-        QVERIFY2(second.syncFolder(cloud, &error), qPrintable(error));
-        QVERIFY(QFile::exists(second.coverPath(second.books().first())));
+        QVERIFY2(store.importFolder(sync, &summary, &error), qPrintable(error));
+        QCOMPARE(summary.imported, 3);
+        QCOMPARE(summary.skippedDuplicates, 0);
+        QCOMPARE(summary.failed, 2);
+        QCOMPARE(summary.removedDuplicates, 0);
+        QCOMPARE(store.books().size(), 3);
+        bool sawEpub = false;
+        for (const Book &book : store.books()) {
+            QVERIFY(QFile::exists(store.textPath(book)));
+            QVERIFY(QFile::exists(store.coverPath(book)));
+            if (!book.storedFileName.endsWith(".epub")) continue;
+            sawEpub = true;
+            QCOMPARE(book.title, QString("Sample EPUB"));
+            QVERIFY(!book.chapterTitles.isEmpty());
+        }
+        QVERIFY(sawEpub);
+
+        const QString trackedId = store.books().first().id;
+        QVERIFY(store.savePosition(trackedId, 5, &error));
+        FolderImportSummary again;
+        QVERIFY2(store.importFolder(sync, &again, &error), qPrintable(error));
+        QCOMPARE(again.imported, 0);
+        QCOMPARE(again.skippedDuplicates, 3);
+        QCOMPARE(again.failed, 2);
+        QCOMPARE(store.books().size(), 3);
+        QCOMPARE(store.books().first().id, trackedId);
+        QCOMPARE(store.books().first().position, 5);
+    }
+
+    void folderImportMergesNearDuplicateCopies()
+    {
+        QTemporaryDir directory;
+        const QString sync = directory.filePath("kindle");
+        const QByteArray contents = bookText("城南旧事", 80);
+        QVERIFY(writeTextFile(sync + "/城南旧事.txt", contents));
+        QVERIFY(writeTextFile(sync + "/重复下载/城南旧事（副本）.txt",
+                              contents + QStringLiteral("尾声：多年以后，我又回到那条胡同。").toUtf8()));
+        // 同名但正文完全不同，或正文相同但书名完全不同，都不应被合并。
+        QVERIFY(writeTextFile(sync + "/另一个版本/城南旧事.txt", bookText("三国演义", 80)));
+        QVERIFY(writeTextFile(sync + "/人间词话.txt", contents));
+
+        LibraryStore store(directory.filePath("app"));
+        FolderImportSummary summary;
+        QString error;
+        QVERIFY2(store.importFolder(sync, &summary, &error), qPrintable(error));
+        QCOMPARE(summary.imported, 3);
+        QCOMPARE(summary.skippedDuplicates, 1);
+        QCOMPARE(store.books().size(), 3);
+        QCOMPARE(store.dedupe(&error), 0);
+        QCOMPARE(store.books().size(), 3);
+    }
+
+    void dedupeKeepsOneCopyAndMergesReadingTrail()
+    {
+        QTemporaryDir directory;
+        const QString source = directory.filePath("城南旧事.txt");
+        const QByteArray contents = bookText("城南旧事", 60);
+        QVERIFY(writeTextFile(source, contents));
+
+        LibraryStore store(directory.filePath("app"));
+        QString error;
+        const QString firstId = store.importTextFile(source, &error);
+        QVERIFY2(!firstId.isEmpty(), qPrintable(error));
+        QVERIFY(store.savePosition(firstId, 12, &error));
+        QVERIFY(store.addBookmark(firstId, 12, &error));
+        QTest::qWait(5);
+        const QString secondId = store.importTextFile(source, &error);
+        QVERIFY2(!secondId.isEmpty(), qPrintable(error));
+        QVERIFY(store.addBookmark(secondId, 20, &error));
+        QCOMPARE(store.books().size(), 2);
+
+        Book discarded;
+        for (const Book &book : store.books()) {
+            if (book.id == secondId) discarded = book;
+        }
+        QVERIFY(!discarded.storedFileName.isEmpty());
+
+        QCOMPARE(store.dedupe(&error), 1);
+        QCOMPARE(store.books().size(), 1);
+        const Book kept = store.books().first();
+        QCOMPARE(kept.id, firstId);
+        QCOMPARE(kept.position, 12);
+        QCOMPARE(kept.bookmarks.size(), 2);
+        QVERIFY(!QFile::exists(store.textPath(discarded)));
+        QVERIFY(!QFile::exists(store.coverPath(discarded)));
+
+        LibraryStore reopened(directory.filePath("app"));
+        QCOMPARE(reopened.books().size(), 1);
+        QCOMPARE(reopened.books().first().bookmarks.size(), 2);
+    }
+
+    void folderImportAutomaticallyMergesExistingDuplicates()
+    {
+        QTemporaryDir directory;
+        const QString source = directory.filePath("城南旧事.txt");
+        QVERIFY(writeTextFile(source, bookText("城南旧事", 40)));
+        LibraryStore store(directory.filePath("app"));
+        QString error;
+        QVERIFY(!store.importTextFile(source, &error).isEmpty());
+        QVERIFY(!store.importTextFile(source, &error).isEmpty());
+        QCOMPARE(store.books().size(), 2);
+
+        const QString sync = directory.filePath("kindle");
+        QVERIFY(QDir().mkpath(sync));
+        FolderImportSummary summary;
+        QVERIFY2(store.importFolder(sync, &summary, &error), qPrintable(error));
+        QCOMPARE(summary.imported, 0);
+        QCOMPARE(summary.removedDuplicates, 1);
+        QCOMPARE(store.books().size(), 1);
+    }
+
+    void importFolderReportsMissingFolder()
+    {
+        QTemporaryDir directory;
+        LibraryStore store(directory.filePath("app"));
+        FolderImportSummary summary;
+        QString error;
+        QVERIFY(!store.importFolder(directory.filePath("missing"), &summary, &error));
+        QVERIFY(error.contains(QStringLiteral("不存在")));
+        QVERIFY(store.books().isEmpty());
+    }
+
+    void defaultSyncFolderIsTheKindleICloudFolder()
+    {
+        const QString expected = QDir::home().filePath(
+            QStringLiteral("Library/Mobile Documents/com~apple~CloudDocs/本机迁移/Documents/kindle"));
+        QCOMPARE(LibraryStore::defaultSyncFolder(), expected);
+        QVERIFY(LibraryStore::defaultSyncFolder().endsWith(QStringLiteral("/kindle")));
     }
 
     void readerSearchWrapsAndAnnotationsCanBeSelected()

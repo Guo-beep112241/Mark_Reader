@@ -34,6 +34,9 @@ private:
     void reloadReaderMetadata(const Book &book);
     void applyTheme();
     void updateReaderFooter();
+    void runSyncFolder();
+    void chooseSyncFolder();
+    void importSyncFolder(const QString &folderPath);
     QPixmap coverFor(const Book &book);
 
     LibraryStore m_store;
