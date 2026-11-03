@@ -55,6 +55,8 @@ private:
     QLabel *m_shelfCount;
     QLabel *m_readerFooter;
     QPushButton *m_themeButton;
+    QPushButton *m_openButton = nullptr;
+    QPushButton *m_removeButton = nullptr;
     PaperWidget *m_shelfPage;
     PaperWidget *m_readerPage;
     OrnamentRule *m_shelfRule;

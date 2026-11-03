@@ -75,6 +75,8 @@ MainWindow::MainWindow(QWidget *parent)
     removeButton->setToolTip("从书架移除选中的书，不会删除原文件");
     openButton->setEnabled(false);
     removeButton->setEnabled(false);
+    m_openButton = openButton;
+    m_removeButton = removeButton;
     headerRow->addWidget(syncButton, 0, Qt::AlignBottom);
     headerRow->addWidget(openButton, 0, Qt::AlignBottom);
     headerRow->addWidget(removeButton, 0, Qt::AlignBottom);
@@ -243,10 +245,10 @@ MainWindow::MainWindow(QWidget *parent)
                 if (chosen == importAction) runSyncFolder();
                 else if (chosen == chooseAction) chooseSyncFolder();
             });
-    connect(m_shelf, &QListWidget::itemSelectionChanged, this, [this, openButton, removeButton] {
+    connect(m_shelf, &QListWidget::itemSelectionChanged, this, [this] {
         const bool hasSelection = m_shelf->currentItem() != nullptr;
-        openButton->setEnabled(hasSelection);
-        removeButton->setEnabled(hasSelection);
+        m_openButton->setEnabled(hasSelection);
+        m_removeButton->setEnabled(hasSelection);
     });
     connect(openButton, &QPushButton::clicked, this, [this] { openBook(m_shelf->currentRow()); });
     connect(removeButton, &QPushButton::clicked, this, [this] { removeSelectedBook(); });
@@ -387,6 +389,9 @@ void MainWindow::refreshShelf()
     m_shelfCount->setVisible(!empty);
     m_shelfCount->setText(empty ? QString()
                                 : QString("共 %1 册 · 点击封面开始阅读").arg(books.size()));
+    const bool hasSelection = m_shelf->currentItem() != nullptr;
+    m_openButton->setEnabled(hasSelection);
+    m_removeButton->setEnabled(hasSelection);
 }
 
 void MainWindow::reloadReaderMetadata(const Book &book)
