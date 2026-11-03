@@ -41,19 +41,39 @@ QByteArray readEntry(zip_t *archive, const QString &name, QString *error)
     return contents;
 }
 
+// EPUB 内的 href 是相对包文件（OPF）的 URL 路径，可能带查询串、片段和百分号编码。
+QString entryPath(const QString &basePath, const QString &href)
+{
+    QString path = href.section('#', 0, 0).section('?', 0, 0);
+    path = QUrl::fromPercentEncoding(path.toUtf8());
+    path.replace('\\', '/');
+    // 畸形 EPUB 可能写出以 / 开头的“容器绝对路径”；zip 条目始终是相对路径。
+    while (path.startsWith('/')) path.remove(0, 1);
+    if (path.isEmpty()) return {};
+    if (basePath.isEmpty() || basePath == QStringLiteral(".")) return QDir::cleanPath(path);
+    return QDir::cleanPath(basePath + '/' + path);
+}
+
 QString extractChapterText(const QByteArray &contents, QString *title, QString *error)
 {
     QXmlStreamReader xml(contents);
     QString result;
+    QString headTitle;
     bool inBody = false;
     while (!xml.atEnd()) {
         xml.readNext();
         if (xml.isStartElement()) {
             const QString name = xml.name().toString().toLower();
-            if (name == "body") inBody = true;
-            if (!inBody) continue;
-            if (name == "h1" || name == "h2") {
-                const QString heading = xml.readElementText(QXmlStreamReader::IncludeChildElements).trimmed();
+            if (name == "body") {
+                inBody = true;
+            } else if (!inBody) {
+                // 没有标题元素时，XHTML 的 <title> 比文件名更适合作为章节名。
+                if (name == "title" && headTitle.isEmpty())
+                    headTitle = xml.readElementText(QXmlStreamReader::IncludeChildElements).trimmed();
+            } else if (name == "h1" || name == "h2" || name == "h3" || name == "h4"
+                       || name == "h5" || name == "h6") {
+                const QString heading =
+                    xml.readElementText(QXmlStreamReader::IncludeChildElements).trimmed();
                 if (title->isEmpty() && !heading.isEmpty()) *title = heading;
                 if (!heading.isEmpty()) result += heading + "\n\n";
             } else if (name == "p" || name == "div" || name == "br" || name == "li") {
@@ -73,6 +93,7 @@ QString extractChapterText(const QByteArray &contents, QString *title, QString *
         if (error) *error = QStringLiteral("EPUB 章节 XHTML 格式错误：%1").arg(xml.errorString());
         return {};
     }
+    if (title->isEmpty()) *title = headTitle;
     return result.trimmed();
 }
 }
@@ -92,7 +113,7 @@ bool EpubDocument::load(const QString &path, EpubDocument *document, QString *er
     while (!containerXml.atEnd()) {
         containerXml.readNext();
         if (containerXml.isStartElement() && containerXml.name() == "rootfile") {
-            packagePath = containerXml.attributes().value("full-path").toString();
+            packagePath = containerXml.attributes().value("full-path").toString().trimmed();
             break;
         }
     }
@@ -100,6 +121,7 @@ bool EpubDocument::load(const QString &path, EpubDocument *document, QString *er
         if (error) *error = QStringLiteral("EPUB 缺少 package.opf 索引。");
         return false;
     }
+    packagePath = QUrl::fromPercentEncoding(packagePath.toUtf8());
     const QByteArray packageData = readEntry(archive.get(), packagePath, error);
     if (packageData.isEmpty()) return false;
     QXmlStreamReader packageXml(packageData);
@@ -112,7 +134,7 @@ bool EpubDocument::load(const QString &path, EpubDocument *document, QString *er
         if (!packageXml.isStartElement()) continue;
         const QString element = packageXml.name().toString();
         if (element == "title" && bookTitle.isEmpty()) {
-            bookTitle = packageXml.readElementText().trimmed();
+            bookTitle = packageXml.readElementText(QXmlStreamReader::IncludeChildElements).trimmed();
         } else if (element == "item") {
             const auto attributes = packageXml.attributes();
             manifest.insert(attributes.value("id").toString(),
@@ -137,6 +159,15 @@ bool EpubDocument::load(const QString &path, EpubDocument *document, QString *er
 
     QString coverHref;
     if (!coverId.isEmpty() && manifest.contains(coverId)) coverHref = manifest.value(coverId).href;
+    if (coverHref.isEmpty() && !coverId.isEmpty()) {
+        // 少数 EPUB 把 cover 元数据直接写成图片的相对路径，而不是 manifest id。
+        for (auto item = manifest.cbegin(); item != manifest.cend(); ++item) {
+            if (entryPath(basePath, item->href) == entryPath(basePath, coverId)) {
+                coverHref = item->href;
+                break;
+            }
+        }
+    }
     if (coverHref.isEmpty()) {
         for (auto item = manifest.cbegin(); item != manifest.cend(); ++item) {
             if (item->properties.split(' ', Qt::SkipEmptyParts).contains("cover-image")) {
@@ -155,22 +186,23 @@ bool EpubDocument::load(const QString &path, EpubDocument *document, QString *er
         }
     }
     if (!coverHref.isEmpty()) {
-        const QString decoded = QUrl::fromPercentEncoding(coverHref.section('#', 0, 0).toUtf8());
-        const QString coverPath = QDir(basePath).filePath(decoded);
-        parsed.coverData = readEntry(archive.get(), QDir::cleanPath(coverPath), nullptr);
+        parsed.coverData =
+            readEntry(archive.get(), entryPath(basePath, coverHref), nullptr);
     }
 
     for (const QString &id : spine) {
         if (!manifest.contains(id)) continue;
-        const QString href = manifest.value(id).href.section('#', 0, 0).section('?', 0, 0);
-        const QString chapterPath = QDir(basePath).filePath(QUrl::fromPercentEncoding(href.toUtf8()));
-        const QByteArray chapterData = readEntry(archive.get(), QDir::cleanPath(chapterPath), error);
-        if (chapterData.isEmpty()) return false;
+        const QString href = manifest.value(id).href;
+        const QString chapterPath = entryPath(basePath, href);
+        if (chapterPath.isEmpty()) continue;
+        QString chapterError;
+        const QByteArray chapterData = readEntry(archive.get(), chapterPath, &chapterError);
+        // 空章节或单个损坏的章节跳过，不因为一个条目丢失整本书的正文。
+        if (chapterData.isEmpty()) continue;
         EpubChapter chapter;
-        chapter.text = extractChapterText(chapterData, &chapter.title, error);
-        if (chapter.title.isEmpty()) chapter.title = QFileInfo(manifest.value(id).href).completeBaseName();
+        chapter.text = extractChapterText(chapterData, &chapter.title, &chapterError);
+        if (chapter.title.isEmpty()) chapter.title = QFileInfo(chapterPath).completeBaseName();
         if (chapter.text.isEmpty()) continue;
-        chapter.offset = parsed.text.size();
         if (!parsed.text.isEmpty()) parsed.text += "\n\n";
         chapter.offset = parsed.text.size();
         parsed.text += chapter.title + "\n\n" + chapter.text;

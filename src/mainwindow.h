@@ -32,6 +32,7 @@ protected:
 private:
     void refreshShelf();
     void openBook(int row);
+    void removeSelectedBook();
     void saveCurrentPosition();
     void reloadReaderMetadata(const Book &book);
     void applyTheme();
@@ -66,6 +67,8 @@ private:
     QLabel *m_readerFooter;
     QLabel *m_readerHint;
     QPushButton *m_themeButton;
+    QPushButton *m_openButton = nullptr;
+    QPushButton *m_removeButton = nullptr;
     QPushButton *m_notesButton;
     QPushButton *m_settingsButton;
     QPushButton *m_selectionNoteButton;

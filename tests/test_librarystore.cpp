@@ -9,6 +9,7 @@
 
 #include <QBuffer>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -16,6 +17,7 @@
 #include <QIcon>
 #include <QImage>
 #include <QListWidget>
+#include <QMap>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -34,6 +36,20 @@ static bool writeZipEntry(zip_t *archive, const char *name, const QByteArray &co
 {
     zip_source_t *source = zip_source_buffer(archive, contents.constData(), contents.size(), 0);
     return source && zip_file_add(archive, name, source, ZIP_FL_ENC_UTF_8) >= 0;
+}
+
+// 按条目名写入一个最小 EPUB；测试可以自由控制 container/OPF/XHTML 的路径和内容。
+static bool writeEpub(const QString &path, const QMap<QString, QByteArray> &entries)
+{
+    int error = 0;
+    zip_t *archive = zip_open(path.toUtf8().constData(), ZIP_CREATE | ZIP_TRUNCATE, &error);
+    if (!archive) return false;
+    for (auto entry = entries.cbegin(); entry != entries.cend(); ++entry) {
+        if (writeZipEntry(archive, entry.key().toUtf8().constData(), entry.value())) continue;
+        zip_discard(archive);
+        return false;
+    }
+    return zip_close(archive) == 0;
 }
 
 static bool createEpub(const QString &path, const QByteArray &cover = {})
@@ -81,6 +97,13 @@ static bool writeTextFile(const QString &path, const QByteArray &contents)
     QDir().mkpath(QFileInfo(path).path());
     QFile file(path);
     return file.open(QIODevice::WriteOnly) && file.write(contents) == contents.size();
+}
+
+static bool setFileModified(const QString &path, const QDateTime &time)
+{
+    QFile file(path);
+    return file.open(QIODevice::ReadWrite)
+        && file.setFileTime(time, QFileDevice::FileModificationTime);
 }
 
 // 生成多段带主题词的正文，让不同主题的书在分片特征上没有重合。
@@ -211,7 +234,58 @@ private slots:
         QString error;
         QVERIFY(store.importTextFile(source.fileName(), &error).isEmpty());
         QVERIFY(error.contains("UTF-8"));
+        QVERIFY(error.contains("GBK"));
         QVERIFY(store.books().isEmpty());
+    }
+
+    void removesBookAndItsLocalFiles()
+    {
+        QTemporaryDir directory;
+        const QString sourcePath = directory.filePath("remove-me.txt");
+        QVERIFY(writeTextFile(sourcePath, "A book that will be removed."));
+        LibraryStore store(directory.filePath("app"));
+        QString error;
+        const QString id = store.importTextFile(sourcePath, &error);
+        QVERIFY2(!id.isEmpty(), qPrintable(error));
+        const Book book = store.books().first();
+        const QString textPath = store.textPath(book);
+        const QString coverPath = store.coverPath(book);
+        QVERIFY(QFile::exists(textPath));
+        QVERIFY(QFile::exists(coverPath));
+
+        QVERIFY2(store.removeBook(id, &error), qPrintable(error));
+        QVERIFY(store.books().isEmpty());
+        QVERIFY(!QFile::exists(textPath));
+        QVERIFY(!QFile::exists(coverPath));
+        // 移除只影响应用内副本，用户选择的原文件仍然保留。
+        QVERIFY(QFile::exists(sourcePath));
+
+        LibraryStore reopened(directory.filePath("app"));
+        QVERIFY(reopened.books().isEmpty());
+    }
+
+    void removingOneBookKeepsTheOthers()
+    {
+        QTemporaryDir directory;
+        const QString firstPath = directory.filePath("first.txt");
+        const QString secondPath = directory.filePath("second.txt");
+        QVERIFY(writeTextFile(firstPath, "first book"));
+        QVERIFY(writeTextFile(secondPath, "second book"));
+        LibraryStore store(directory.filePath("app"));
+        QString error;
+        const QString firstId = store.importTextFile(firstPath, &error);
+        const QString secondId = store.importTextFile(secondPath, &error);
+        QVERIFY(!firstId.isEmpty());
+        QVERIFY(!secondId.isEmpty());
+
+        QVERIFY(store.removeBook(firstId, &error));
+        QCOMPARE(store.books().size(), 1);
+        QCOMPARE(store.books().first().id, secondId);
+        QVERIFY(QFile::exists(store.textPath(store.books().first())));
+
+        QVERIFY(!store.removeBook(firstId, &error));
+        QVERIFY(error.contains("找不到"));
+        QCOMPARE(store.books().size(), 1);
     }
 
     void sortsBooksByMostRecentReading()
@@ -284,6 +358,151 @@ private slots:
         EpubDocument parsed;
         QVERIFY2(EpubDocument::load(store.textPath(book), &parsed, &error), qPrintable(error));
         QVERIFY(!parsed.coverData.isEmpty());
+    }
+
+    void loadsEpubWithNestedOpfAndEncodedPaths()
+    {
+        QTemporaryDir directory;
+        QImage artwork(180, 270, QImage::Format_ARGB32);
+        artwork.fill(QColor("#2f4a3a"));
+        const QByteArray container = R"(<?xml version="1.0" encoding="UTF-8"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+  <rootfiles>
+    <rootfile full-path="OPS/package/book%20one.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>)";
+        const QByteArray package = R"(<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns='http://www.idpf.org/2007/opf' version="3.0">
+  <metadata xmlns:dc='http://purl.org/dc/elements/1.1/'>
+    <dc:title>Nested &amp; Encoded</dc:title>
+  </metadata>
+  <manifest>
+    <item id="ch1" href="text/chapter%201.xhtml" media-type="application/xhtml+xml"/>
+    <item id="art" href="images/artwork.png" media-type="image/png" properties="cover-image"/>
+  </manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>)";
+        const QByteArray chapter = R"(<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns='http://www.w3.org/1999/xhtml'>
+  <head><title>Head Chapter Title</title></head>
+  <body><p>Nested path text.</p></body>
+</html>)";
+        const QString path = directory.filePath("nested.epub");
+        QVERIFY(writeEpub(path, {
+            {"META-INF/container.xml", container},
+            {"OPS/package/book one.opf", package},
+            {"OPS/package/text/chapter 1.xhtml", chapter},
+            {"OPS/package/images/artwork.png", pngBytes(artwork)},
+        }));
+
+        EpubDocument parsed;
+        QString error;
+        QVERIFY2(EpubDocument::load(path, &parsed, &error), qPrintable(error));
+        QCOMPARE(parsed.title, QString("Nested & Encoded"));
+        QCOMPARE(parsed.chapters.size(), 1);
+        QCOMPARE(parsed.chapters.first().title, QString("Head Chapter Title"));
+        QCOMPARE(parsed.chapters.first().offset, 0);
+        QVERIFY(parsed.text.contains("Nested path text."));
+        QVERIFY(!parsed.coverData.isEmpty());
+    }
+
+    void prefersHeadingAndEpub2CoverMeta()
+    {
+        QTemporaryDir directory;
+        QImage artwork(120, 180, QImage::Format_ARGB32);
+        artwork.fill(QColor("#3b4f6b"));
+        const QByteArray container =
+            R"(<container><rootfiles><rootfile full-path="OPS/book.opf"/></rootfiles></container>)";
+        const QByteArray package = R"(<package>
+  <metadata><title>Cover Meta Book</title><meta name="cover" content="images/cover.png"/></metadata>
+  <manifest>
+    <item id="cover-art" href="images/cover.png" media-type="image/png"/>
+    <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>)";
+        const QByteArray chapter = R"(<html><head><title>Ignored Head Title</title></head>
+<body><h2>Heading Two</h2><p>Body text.</p></body></html>)";
+        const QString path = directory.filePath("cover-meta.epub");
+        QVERIFY(writeEpub(path, {
+            {"META-INF/container.xml", container},
+            {"OPS/book.opf", package},
+            {"OPS/chapter1.xhtml", chapter},
+            {"OPS/images/cover.png", pngBytes(artwork)},
+        }));
+
+        EpubDocument parsed;
+        QString error;
+        QVERIFY2(EpubDocument::load(path, &parsed, &error), qPrintable(error));
+        QCOMPARE(parsed.title, QString("Cover Meta Book"));
+        QCOMPARE(parsed.chapters.size(), 1);
+        QCOMPARE(parsed.chapters.first().title, QString("Heading Two"));
+        QVERIFY(parsed.text.contains("Heading Two"));
+        QVERIFY(!parsed.coverData.isEmpty());
+    }
+
+    void skipsBrokenSpineEntriesAndKeepsOffsets()
+    {
+        QTemporaryDir directory;
+        const QByteArray container =
+            R"(<container><rootfiles><rootfile full-path="OPS/book.opf"/></rootfiles></container>)";
+        const QByteArray package = R"(<package>
+  <metadata><title>Broken Spine Book</title></metadata>
+  <manifest>
+    <item id="empty" href="empty.xhtml"/>
+    <item id="broken" href="broken.xhtml"/>
+    <item id="ch1" href="ch1.xhtml"/>
+    <item id="ch2" href="ch2.xhtml"/>
+  </manifest>
+  <spine>
+    <itemref idref="empty"/>
+    <itemref idref="missing"/>
+    <itemref idref="broken"/>
+    <itemref idref="ch1"/>
+    <itemref idref="ch2"/>
+  </spine>
+</package>)";
+        const QString path = directory.filePath("broken-spine.epub");
+        QVERIFY(writeEpub(path, {
+            {"META-INF/container.xml", container},
+            {"OPS/book.opf", package},
+            {"OPS/empty.xhtml", "   "},
+            {"OPS/broken.xhtml", "<html><body><p>unclosed"},
+            {"OPS/ch1.xhtml", "<html><body><h1>One</h1><p>First body.</p></body></html>"},
+            {"OPS/ch2.xhtml", "<html><body><h1>Two</h1><p>Second body.</p></body></html>"},
+        }));
+
+        EpubDocument parsed;
+        QString error;
+        QVERIFY2(EpubDocument::load(path, &parsed, &error), qPrintable(error));
+        QCOMPARE(parsed.chapters.size(), 2);
+        QCOMPARE(parsed.chapters.at(0).title, QString("One"));
+        QCOMPARE(parsed.chapters.at(1).title, QString("Two"));
+        QVERIFY(parsed.chapters.at(1).offset > parsed.chapters.at(0).offset);
+        QVERIFY(parsed.text.mid(parsed.chapters.at(1).offset).startsWith("Two"));
+    }
+
+    void rejectsEpubWithoutReadableChapters()
+    {
+        QTemporaryDir directory;
+        const QByteArray container =
+            R"(<container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>)";
+        const QByteArray package = R"(<package>
+  <metadata><title>Empty Book</title></metadata>
+  <manifest><item id="empty" href="empty.xhtml"/></manifest>
+  <spine><itemref idref="empty"/></spine>
+</package>)";
+        const QString path = directory.filePath("empty.epub");
+        QVERIFY(writeEpub(path, {
+            {"META-INF/container.xml", container},
+            {"book.opf", package},
+            {"empty.xhtml", ""},
+        }));
+
+        EpubDocument parsed;
+        QString error;
+        QVERIFY(!EpubDocument::load(path, &parsed, &error));
+        QVERIFY(error.contains("正文"));
     }
 
     void importsFolderRecursivelyAndSkipsDuplicates()
@@ -422,6 +641,109 @@ private slots:
         QVERIFY(!store.importFolder(directory.filePath("missing"), &summary, &error));
         QVERIFY(error.contains(QStringLiteral("不存在")));
         QVERIFY(store.books().isEmpty());
+    }
+
+    void tracksSourceFileModificationTime()
+    {
+        QTemporaryDir directory;
+        const QString source = directory.filePath("dated.txt");
+        QVERIFY(writeTextFile(source, "text with a known modification time"));
+        const QDateTime modified = QDateTime::fromSecsSinceEpoch(1700000000);
+        QVERIFY(setFileModified(source, modified));
+
+        LibraryStore store(directory.filePath("app"));
+        QString error;
+        QVERIFY(!store.importTextFile(source, &error).isEmpty());
+        QCOMPARE(store.books().first().fileModifiedAt.toSecsSinceEpoch(),
+                 modified.toSecsSinceEpoch());
+
+        LibraryStore reopened(directory.filePath("app"));
+        QCOMPARE(reopened.books().first().fileModifiedAt.toSecsSinceEpoch(),
+                 modified.toSecsSinceEpoch());
+    }
+
+    void dedupeUsesNewerSourceFileToBreakReadingTie()
+    {
+        QTemporaryDir directory;
+        const QString source = directory.filePath("城南旧事.txt");
+        const QByteArray contents = bookText("城南旧事", 40);
+        QVERIFY(writeTextFile(source, contents));
+        QVERIFY(setFileModified(source, QDateTime::fromSecsSinceEpoch(1700000000)));
+
+        LibraryStore store(directory.filePath("app"));
+        QString error;
+        const QString olderId = store.importTextFile(source, &error);
+        QVERIFY2(!olderId.isEmpty(), qPrintable(error));
+        QVERIFY(setFileModified(source, QDateTime::fromSecsSinceEpoch(1700000100)));
+        const QString newerId = store.importTextFile(source, &error);
+        QVERIFY2(!newerId.isEmpty(), qPrintable(error));
+        QCOMPARE(store.books().size(), 2);
+
+        QCOMPARE(store.dedupe(&error), 1);
+        QCOMPARE(store.books().size(), 1);
+        QCOMPARE(store.books().first().id, newerId);
+    }
+
+    void dedupeKeepsReadingTrailOverNewerFile()
+    {
+        QTemporaryDir directory;
+        const QString source = directory.filePath("城南旧事.txt");
+        QVERIFY(writeTextFile(source, bookText("城南旧事", 40)));
+        QVERIFY(setFileModified(source, QDateTime::fromSecsSinceEpoch(1700000000)));
+
+        LibraryStore store(directory.filePath("app"));
+        QString error;
+        const QString readId = store.importTextFile(source, &error);
+        QVERIFY2(!readId.isEmpty(), qPrintable(error));
+        QVERIFY(store.savePosition(readId, 12, &error));
+        QVERIFY(store.addBookmark(readId, 12, &error));
+
+        QVERIFY(setFileModified(source, QDateTime::fromSecsSinceEpoch(1700000100)));
+        QVERIFY(!store.importTextFile(source, &error).isEmpty());
+        QCOMPARE(store.books().size(), 2);
+
+        QCOMPARE(store.dedupe(&error), 1);
+        const Book kept = store.books().first();
+        QCOMPARE(kept.id, readId);
+        QCOMPARE(kept.position, 12);
+        QCOMPARE(kept.bookmarks.size(), 1);
+    }
+
+    void folderImportKeepsChangedSourceAsSeparateBook()
+    {
+        QTemporaryDir directory;
+        const QString sync = directory.filePath("kindle");
+        const QString source = sync + "/城南旧事.txt";
+        QByteArray firstContents;
+        QByteArray secondContents;
+        for (int index = 0; index < 120; ++index) {
+            firstContents += QStringLiteral("第一版：胡同里的旧事第 %1 段。\n").arg(index).toUtf8();
+            secondContents += QStringLiteral("第二版：战场上的故事第 %1 段。\n").arg(index).toUtf8();
+        }
+        QVERIFY(writeTextFile(source, firstContents));
+
+        LibraryStore store(directory.filePath("app"));
+        FolderImportSummary summary;
+        QString error;
+        QVERIFY2(store.importFolder(sync, &summary, &error), qPrintable(error));
+        QCOMPARE(summary.imported, 1);
+        const Book original = store.books().first();
+        QVERIFY(store.savePosition(original.id, 10, &error));
+
+        // 来源文件在另一端被改写：导入时不覆盖已有记录，而是作为新书并存。
+        QVERIFY(writeTextFile(source, secondContents));
+        FolderImportSummary again;
+        QVERIFY2(store.importFolder(sync, &again, &error), qPrintable(error));
+        QCOMPARE(again.imported, 1);
+        QCOMPARE(store.books().size(), 2);
+        bool keptOriginal = false;
+        for (const Book &book : store.books()) {
+            if (book.id != original.id) continue;
+            keptOriginal = true;
+            QCOMPARE(book.position, 10);
+            QVERIFY(QFile::exists(store.textPath(book)));
+        }
+        QVERIFY(keptOriginal);
     }
 
     void defaultSyncFolderIsTheKindleICloudFolder()
