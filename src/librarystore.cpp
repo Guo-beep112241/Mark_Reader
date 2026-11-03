@@ -27,6 +27,7 @@ QJsonObject bookToJson(const Book &book)
     object.insert("position", book.position);
     object.insert("characterCount", book.characterCount);
     object.insert("lastRead", book.lastRead.toString(Qt::ISODate));
+    object.insert("fileModifiedAt", book.fileModifiedAt.toString(Qt::ISODate));
     QJsonArray titles;
     for (const QString &title : book.chapterTitles) titles.append(title);
     object.insert("chapterTitles", titles);
@@ -60,6 +61,7 @@ Book bookFromJson(const QJsonObject &object)
     book.position = qMax(0, object.value("position").toInt());
     book.characterCount = qMax(0, object.value("characterCount").toInt());
     book.lastRead = QDateTime::fromString(object.value("lastRead").toString(), Qt::ISODate);
+    book.fileModifiedAt = QDateTime::fromString(object.value("fileModifiedAt").toString(), Qt::ISODate);
     for (const auto value : object.value("chapterTitles").toArray()) book.chapterTitles.append(value.toString());
     for (const auto value : object.value("chapterOffsets").toArray()) book.chapterOffsets.append(qMax(0, value.toInt()));
     for (const auto value : object.value("bookmarks").toArray()) {
@@ -249,7 +251,12 @@ bool keepsBetterReadingTrail(const Book &candidate, const Book &current)
     if (candidate.position != current.position) return candidate.position > current.position;
     const int candidateMarks = candidate.bookmarks.size() + candidate.annotations.size();
     const int currentMarks = current.bookmarks.size() + current.annotations.size();
-    return candidateMarks > currentMarks;
+    if (candidateMarks != currentMarks) return candidateMarks > currentMarks;
+    // 阅读痕迹完全打平时，用来源文件的修改时间决定保留哪一本，避免两端的
+    // 同名副本在不同设备上随机互换。
+    if (candidate.fileModifiedAt.isValid() != current.fileModifiedAt.isValid())
+        return candidate.fileModifiedAt.isValid();
+    return candidate.fileModifiedAt > current.fileModifiedAt;
 }
 
 void absorbBook(Book &keeper, const Book &loser, bool identicalContent)
@@ -344,12 +351,15 @@ QString LibraryStore::importTextFile(const QString &sourcePath, QString *error)
     }
     const QString decoded = QString::fromUtf8(contents.constData(), contents.size());
     if (decoded.toUtf8() != contents) {
-        if (error) *error = QStringLiteral("文件不是有效的 UTF-8 文本，暂不支持导入。");
+        if (error)
+            *error = QStringLiteral("文件不是有效的 UTF-8 文本。目前只支持 UTF-8 编码的 TXT；"
+                                    "GBK/GB18030 等中文旧编码请先用文本编辑器另存为 UTF-8 再导入。");
         return {};
     }
     Book book;
     book.title = QFileInfo(sourcePath).completeBaseName();
     book.characterCount = static_cast<int>(decoded.size());
+    book.fileModifiedAt = QFileInfo(sourcePath).lastModified();
     return insertBook(book, QStringLiteral(".txt"), contents, {}, error);
 }
 
@@ -367,6 +377,7 @@ QString LibraryStore::importEpubFile(const QString &sourcePath, QString *error)
     book.title = document.title.trimmed().isEmpty() ? QFileInfo(sourcePath).completeBaseName()
                                                     : document.title;
     book.characterCount = document.text.size();
+    book.fileModifiedAt = QFileInfo(sourcePath).lastModified();
     for (const auto &chapter : document.chapters) {
         book.chapterTitles.append(chapter.title);
         book.chapterOffsets.append(chapter.offset);
@@ -410,6 +421,31 @@ QString LibraryStore::coverPath(const Book &book) const
 {
     if (book.id.isEmpty()) return {};
     return QDir(m_dataDirectory).filePath(book.id + "-cover.png");
+}
+
+bool LibraryStore::removeBook(const QString &bookId, QString *error)
+{
+    int index = -1;
+    for (int i = 0; i < m_books.size(); ++i) {
+        if (m_books.at(i).id == bookId) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0) {
+        if (error) *error = QStringLiteral("找不到这本书。");
+        return false;
+    }
+    const Book removed = m_books.at(index);
+    m_books.removeAt(index);
+    // 先持久化书架，再清理副本；即使文件删除失败，也不会留下指向空文件的记录。
+    if (!save(error)) {
+        m_books.insert(index, removed);
+        return false;
+    }
+    QFile::remove(textPath(removed));
+    removeCover(removed);
+    return true;
 }
 
 bool LibraryStore::savePosition(const QString &bookId, int position, QString *error)
@@ -504,6 +540,7 @@ bool LibraryStore::importFolder(const QString &folderPath, FolderImportSummary *
         const bool epub = QFileInfo(path).suffix().compare("epub", Qt::CaseInsensitive) == 0;
         const QString fileName = QFileInfo(path).fileName();
         Book book;
+        book.fileModifiedAt = QFileInfo(path).lastModified();
         QString candidateText;
         QByteArray contents;
         QByteArray cover;
@@ -543,7 +580,8 @@ bool LibraryStore::importFolder(const QString &folderPath, FolderImportSummary *
             if (contents.isEmpty() || decoded.toUtf8() != contents) {
                 ++collected.failed;
                 collected.warnings.append(
-                    QStringLiteral("%1：不是有效的 UTF-8 文本").arg(fileName));
+                    QStringLiteral("%1：不是有效的 UTF-8 文本（暂不支持 GBK/GB18030，请先另存为 UTF-8）")
+                        .arg(fileName));
                 continue;
             }
             book.title = QFileInfo(path).completeBaseName();

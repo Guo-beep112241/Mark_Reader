@@ -30,6 +30,7 @@ protected:
 private:
     void refreshShelf();
     void openBook(int row);
+    void removeSelectedBook();
     void saveCurrentPosition();
     void reloadReaderMetadata(const Book &book);
     void applyTheme();

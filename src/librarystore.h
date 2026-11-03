@@ -35,6 +35,8 @@ public:
     QString textPath(const Book &book) const;
     // 每本书的封面由书籍 ID 派生，文件名固定，便于同步文件夹一起复制。
     QString coverPath(const Book &book) const;
+    // 从书架移除书籍，同时删除应用内副本和封面；原文件不受影响。
+    bool removeBook(const QString &bookId, QString *error = nullptr);
     bool savePosition(const QString &bookId, int position, QString *error = nullptr);
     bool addBookmark(const QString &bookId, int position, QString *error = nullptr);
     bool addAnnotation(const QString &bookId, int start, int end, const QString &quote,

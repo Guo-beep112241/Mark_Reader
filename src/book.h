@@ -28,6 +28,8 @@ struct Book {
     int position = 0;
     int characterCount = 0;
     QDateTime lastRead;
+    // 导入时来源文件的修改时间，用于合并重复副本时区分文件版本。
+    QDateTime fileModifiedAt;
     QStringList chapterTitles;
     QList<int> chapterOffsets;
     QList<Bookmark> bookmarks;
